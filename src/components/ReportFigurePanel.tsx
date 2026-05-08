@@ -270,7 +270,7 @@ function textRows(x: number, y: number, rows: Array<[string, string]>, rowHeight
 function renderWaveformPanel(rect: Rect, title: string, waveforms: readonly DerivedWaveform[], quantity: Quantity): JSX.Element {
   const ordered = [...waveforms].sort((a, b) => componentRank(a.component) - componentRank(b.component));
   const plotTop = rect.y + 44;
-  const rowHeight = (rect.height - 72) / Math.max(1, ordered.length);
+  const rowHeight = (rect.height - 86) / Math.max(1, ordered.length);
   const plotWidth = rect.width - 120;
 
   return card(rect, title, (
@@ -292,7 +292,6 @@ function renderWaveformPanel(rect: Rect, title: string, waveforms: readonly Deri
           <g key={`${quantity}-${waveform.sourceRecordId}`}>
             <text x={rect.x + 2} y={rowRect.y + rowRect.height / 2 + 5} fontSize="12.5" fontWeight="700" fill={color}>{waveform.componentLabel}</text>
             <line x1={rowRect.x} y1={rowRect.y + rowRect.height / 2} x2={rowRect.x + rowRect.width} y2={rowRect.y + rowRect.height / 2} stroke="#9ca3af" strokeWidth="0.55" />
-            <line x1={rowRect.x} y1={rowRect.y + rowRect.height} x2={rowRect.x + rowRect.width} y2={rowRect.y + rowRect.height} stroke="#e5e7eb" strokeWidth="0.5" />
             <path d={timePath(waveform.time, values, rowRect, maxAbs)} fill="none" stroke={color} strokeWidth="1.05" />
             <text x={rowRect.x + rowRect.width - 7} y={rowRect.y + 14} textAnchor="end" fontSize="10.5" fontWeight="600" fill="#374151">
               Max {formatNumber(peak.value, 4)} {quantityUnit(quantity)} at {formatNumber(peak.time, 3)} s
@@ -300,7 +299,7 @@ function renderWaveformPanel(rect: Rect, title: string, waveforms: readonly Deri
           </g>
         );
       })}
-      <text x={rect.x + rect.width / 2} y={rect.y + rect.height - 10} textAnchor="middle" fontSize="11" fontWeight="700" fill="#374151">Time [s]</text>
+      <text x={rect.x + rect.width / 2} y={rect.y + rect.height - 4} textAnchor="middle" fontSize="11" fontWeight="700" fill="#374151">Time [s]</text>
     </g>
   ));
 }
