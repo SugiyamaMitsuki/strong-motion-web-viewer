@@ -2,8 +2,6 @@
 
 Strong Motion Web Viewer is a static browser application for loading and analyzing K-NET, KiK-net, and CSV strong-motion waveform data. It runs entirely in the browser and can be published with GitHub Pages.
 
-This is an original web implementation, not a port of ViewWave.
-
 ## Features
 
 - K-NET / KiK-net file import
