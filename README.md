@@ -68,7 +68,7 @@ https://sugiyamamitsuki.github.io/strong-motion-web-viewer/
   - Source latitude, source longitude, source depth, station latitude, and station longitude can be manually edited
   - Epicentral distance and hypocentral distance are calculated
 - Report overview figure
-  - Combines observation location, latitude/longitude, distances, ground motion strength, acceleration waveforms, velocity waveforms, and response spectrum in one report-ready figure
+  - Combines record metadata, latitude/longitude, distances, ground motion strength, acceleration waveforms, velocity waveforms, and tripartite response spectrum in one report-ready figure
   - Exports the overview figure as SVG or PNG
 - Figure export
   - SVG

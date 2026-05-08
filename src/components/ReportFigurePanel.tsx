@@ -35,12 +35,13 @@ interface SeriesSpec {
 }
 
 const WIDTH = 1600;
-const HEIGHT = 1140;
+const HEIGHT = 1120;
+const FONT_FAMILY = 'Arial, Helvetica, sans-serif';
 const COLORS: Record<string, string> = {
-  NS: '#dc2626',
-  EW: '#2563eb',
-  UD: '#16a34a',
-  OTHER: '#7c3aed',
+  NS: '#D55E00',
+  EW: '#0072B2',
+  UD: '#009E73',
+  OTHER: '#CC79A7',
 };
 
 function isFiniteNumber(value: unknown): value is number {
@@ -179,6 +180,18 @@ function logTicks(min: number, max: number): number[] {
   return ticks;
 }
 
+function logPowers(min: number, max: number): number[] {
+  if (min <= 0 || max <= min) return [];
+  const values: number[] = [];
+  const start = Math.floor(Math.log10(min));
+  const end = Math.ceil(Math.log10(max));
+  for (let exp = start; exp <= end; exp += 1) {
+    const value = 10 ** exp;
+    if (value >= min * 0.999 && value <= max * 1.001) values.push(value);
+  }
+  return values;
+}
+
 function niceLogFloor(value: number, fallback: number): number {
   if (!isFiniteNumber(value) || value <= 0) return fallback;
   return 10 ** Math.floor(Math.log10(value));
@@ -234,8 +247,9 @@ function fmt(value: number | undefined, digits = 4, suffix = ''): string {
 function card(rect: Rect, title: string, children: JSX.Element): JSX.Element {
   return (
     <g>
-      <rect x={rect.x} y={rect.y} width={rect.width} height={rect.height} rx="12" fill="#ffffff" stroke="#d5dbe7" />
-      <text x={rect.x + 18} y={rect.y + 30} fontSize="18" fontWeight="800" fill="#172033">{title}</text>
+      <rect x={rect.x} y={rect.y} width={rect.width} height={rect.height} fill="#ffffff" stroke="#1f2937" strokeWidth="1.2" />
+      <line x1={rect.x} y1={rect.y + 42} x2={rect.x + rect.width} y2={rect.y + 42} stroke="#1f2937" strokeWidth="0.8" />
+      <text x={rect.x + 16} y={rect.y + 27} fontSize="16" fontWeight="700" fill="#111827">{title}</text>
       {children}
     </g>
   );
@@ -246,100 +260,27 @@ function textRows(x: number, y: number, rows: Array<[string, string]>, rowHeight
     <g>
       {rows.map(([label, value], index) => (
         <g key={label} transform={`translate(${x} ${y + index * rowHeight})`}>
-          <text x="0" y="0" fontSize="13" fontWeight="800" fill="#667085">{label}</text>
-          <text x="170" y="0" fontSize="14" fontWeight="700" fill="#172033">{value}</text>
+          <text x="0" y="0" fontSize="12.5" fontWeight="700" fill="#4b5563">{label}</text>
+          <text x="168" y="0" fontSize="13" fontWeight="600" fill="#111827">{value}</text>
         </g>
       ))}
-    </g>
-  );
-}
-
-function renderLocationPlot(rect: Rect, station: ReportStation): JSX.Element {
-  const row = station.row;
-  const points = [
-    isFiniteNumber(row?.eventLat) && isFiniteNumber(row?.eventLon)
-      ? { kind: 'event', label: 'Epicenter', lat: row.eventLat, lon: row.eventLon, color: '#f97316' }
-      : undefined,
-    isFiniteNumber(row?.stationLat) && isFiniteNumber(row?.stationLon)
-      ? { kind: 'station', label: 'Station', lat: row.stationLat, lon: row.stationLon, color: '#dc2626' }
-      : undefined,
-  ].filter((point): point is { kind: string; label: string; lat: number; lon: number; color: string } => point !== undefined);
-
-  const plot: Rect = { x: rect.x + 24, y: rect.y + 52, width: rect.width - 48, height: rect.height - 82 };
-  if (points.length === 0) {
-    return (
-      <g>
-        <rect x={plot.x} y={plot.y} width={plot.width} height={plot.height} rx="8" fill="#f8fafc" stroke="#d5dbe7" />
-        <text x={plot.x + plot.width / 2} y={plot.y + plot.height / 2} textAnchor="middle" fontSize="15" fontWeight="700" fill="#667085">Location data unavailable</text>
-      </g>
-    );
-  }
-
-  const lats = points.map((point) => point.lat);
-  const lons = points.map((point) => point.lon);
-  const latSpan = Math.max(0.01, Math.max(...lats) - Math.min(...lats));
-  const lonSpan = Math.max(0.01, Math.max(...lons) - Math.min(...lons));
-  const latMin = Math.min(...lats) - latSpan * 0.28;
-  const latMax = Math.max(...lats) + latSpan * 0.28;
-  const lonMin = Math.min(...lons) - lonSpan * 0.28;
-  const lonMax = Math.max(...lons) + lonSpan * 0.28;
-  const rendered = points.map((point) => ({
-    ...point,
-    x: scaleLinear(point.lon, lonMin, lonMax, plot.x + 26, plot.x + plot.width - 26),
-    y: scaleLinear(point.lat, latMin, latMax, plot.y + plot.height - 26, plot.y + 26),
-  }));
-  const event = rendered.find((point) => point.kind === 'event');
-  const stationPoint = rendered.find((point) => point.kind === 'station');
-
-  return (
-    <g>
-      <rect x={plot.x} y={plot.y} width={plot.width} height={plot.height} rx="8" fill="#f8fafc" stroke="#d5dbe7" />
-      {[0.25, 0.5, 0.75].map((ratio) => (
-        <g key={ratio}>
-          <line x1={plot.x} y1={plot.y + plot.height * ratio} x2={plot.x + plot.width} y2={plot.y + plot.height * ratio} stroke="#e5e7eb" />
-          <line x1={plot.x + plot.width * ratio} y1={plot.y} x2={plot.x + plot.width * ratio} y2={plot.y + plot.height} stroke="#e5e7eb" />
-        </g>
-      ))}
-      {event && stationPoint && (
-        <>
-          <line x1={event.x} y1={event.y} x2={stationPoint.x} y2={stationPoint.y} stroke="#334155" strokeDasharray="7 7" strokeWidth="2" />
-          <text x={(event.x + stationPoint.x) / 2} y={(event.y + stationPoint.y) / 2 - 8} textAnchor="middle" fontSize="12" fontWeight="800" fill="#334155">
-            {fmt(row?.epicentralDistanceKm, 2, ' km')}
-          </text>
-        </>
-      )}
-      {rendered.map((point) => (
-        <g key={point.kind} transform={`translate(${point.x} ${point.y})`}>
-          {point.kind === 'event' ? (
-            <path d="M0 -13L13 0L0 13L-13 0Z" fill={point.color} stroke="#ffffff" strokeWidth="3" />
-          ) : (
-            <>
-              <path d="M0 -20C-12 -20 -20 -12 -20 -1C-20 14 0 28 0 28C0 28 20 14 20 -1C20 -12 12 -20 0 -20Z" fill={point.color} stroke="#ffffff" strokeWidth="3" />
-              <circle r="6" fill="#ffffff" stroke="#991b1b" strokeWidth="2" />
-            </>
-          )}
-          <text y={point.kind === 'event' ? -21 : -28} textAnchor="middle" fontSize="13" fontWeight="900" fill="#172033" stroke="#ffffff" strokeWidth="4" paintOrder="stroke">{point.label}</text>
-        </g>
-      ))}
-      <text x={plot.x + 10} y={plot.y + plot.height - 10} fontSize="11" fontWeight="700" fill="#667085">Lon {fmt(lonMin, 3)} to {fmt(lonMax, 3)}</text>
-      <text x={plot.x + plot.width - 10} y={plot.y + plot.height - 10} textAnchor="end" fontSize="11" fontWeight="700" fill="#667085">Lat {fmt(latMin, 3)} to {fmt(latMax, 3)}</text>
     </g>
   );
 }
 
 function renderWaveformPanel(rect: Rect, title: string, waveforms: readonly DerivedWaveform[], quantity: Quantity): JSX.Element {
   const ordered = [...waveforms].sort((a, b) => componentRank(a.component) - componentRank(b.component));
-  const plotTop = rect.y + 58;
-  const rowHeight = (rect.height - 92) / Math.max(1, ordered.length);
-  const plotWidth = rect.width - 106;
+  const plotTop = rect.y + 56;
+  const rowHeight = (rect.height - 88) / Math.max(1, ordered.length);
+  const plotWidth = rect.width - 118;
 
   return card(rect, title, (
     <g>
       {ordered.length === 0 ? (
-        <text x={rect.x + rect.width / 2} y={rect.y + rect.height / 2} textAnchor="middle" fontSize="15" fontWeight="700" fill="#667085">No waveform data</text>
+        <text x={rect.x + rect.width / 2} y={rect.y + rect.height / 2} textAnchor="middle" fontSize="13" fontWeight="600" fill="#6b7280">No waveform data</text>
       ) : ordered.map((waveform, index) => {
         const rowRect: Rect = {
-          x: rect.x + 70,
+          x: rect.x + 76,
           y: plotTop + index * rowHeight + 8,
           width: plotWidth,
           height: Math.max(28, rowHeight - 18),
@@ -350,23 +291,23 @@ function renderWaveformPanel(rect: Rect, title: string, waveforms: readonly Deri
         const color = COLORS[waveform.component] ?? COLORS.OTHER;
         return (
           <g key={`${quantity}-${waveform.sourceRecordId}`}>
-            <text x={rect.x + 20} y={rowRect.y + rowRect.height / 2 + 5} fontSize="14" fontWeight="900" fill={color}>{waveform.componentLabel}</text>
-            <rect x={rowRect.x} y={rowRect.y} width={rowRect.width} height={rowRect.height} fill="#f8fafc" stroke="#e5e7eb" />
-            <line x1={rowRect.x} y1={rowRect.y + rowRect.height / 2} x2={rowRect.x + rowRect.width} y2={rowRect.y + rowRect.height / 2} stroke="#cbd5e1" />
-            <path d={timePath(waveform.time, values, rowRect, maxAbs)} fill="none" stroke={color} strokeWidth="1.4" />
-            <text x={rowRect.x + rowRect.width - 8} y={rowRect.y + 15} textAnchor="end" fontSize="12" fontWeight="700" fill="#334155">
+            <text x={rect.x + 18} y={rowRect.y + rowRect.height / 2 + 5} fontSize="13" fontWeight="700" fill={color}>{waveform.componentLabel}</text>
+            <rect x={rowRect.x} y={rowRect.y} width={rowRect.width} height={rowRect.height} fill="#ffffff" stroke="#374151" strokeWidth="0.7" />
+            <line x1={rowRect.x} y1={rowRect.y + rowRect.height / 2} x2={rowRect.x + rowRect.width} y2={rowRect.y + rowRect.height / 2} stroke="#9ca3af" strokeWidth="0.6" />
+            <path d={timePath(waveform.time, values, rowRect, maxAbs)} fill="none" stroke={color} strokeWidth="1.15" />
+            <text x={rowRect.x + rowRect.width - 7} y={rowRect.y + 14} textAnchor="end" fontSize="10.5" fontWeight="600" fill="#374151">
               Max {formatNumber(peak.value, 4)} {quantityUnit(quantity)} at {formatNumber(peak.time, 3)} s
             </text>
           </g>
         );
       })}
-      <text x={rect.x + rect.width / 2} y={rect.y + rect.height - 18} textAnchor="middle" fontSize="12" fontWeight="800" fill="#667085">Time [s]</text>
+      <text x={rect.x + rect.width / 2} y={rect.y + rect.height - 15} textAnchor="middle" fontSize="11.5" fontWeight="700" fill="#374151">Time [s]</text>
     </g>
   ));
 }
 
 function renderResponsePanel(rect: Rect, series: readonly SeriesSpec[], settings: ResponseSpectrumSettings): JSX.Element {
-  const plot: Rect = { x: rect.x + 74, y: rect.y + 58, width: rect.width - 106, height: rect.height - 104 };
+  const plot: Rect = { x: rect.x + 82, y: rect.y + 62, width: rect.width - 122, height: rect.height - 116 };
   const xDomain: [number, number] = [
     niceLogFloor(settings.minPeriod, 0.01),
     niceLogCeil(settings.maxPeriod, 10),
@@ -374,17 +315,33 @@ function renderResponsePanel(rect: Rect, series: readonly SeriesSpec[], settings
   const yDomain = responseYDomain(series);
   const xTicks = logTicks(xDomain[0], xDomain[1]);
   const yTicks = logTicks(yDomain[0], yDomain[1]);
+  const accelerationGuides = logPowers((yDomain[0] * 2 * Math.PI) / xDomain[1], (yDomain[1] * 2 * Math.PI) / xDomain[0]);
+  const displacementGuides = logPowers((yDomain[0] * xDomain[0]) / (2 * Math.PI), (yDomain[1] * xDomain[1]) / (2 * Math.PI));
+  const clipId = 'report-tripartite-clip';
 
-  return card(rect, 'Response Spectrum: pSv', (
+  const guidePath = (points: Array<[number, number]>): string => points
+    .map(([xValue, yValue], index) => {
+      const x = scaleLog(xValue, xDomain[0], xDomain[1], plot.x, plot.x + plot.width);
+      const y = scaleLog(yValue, yDomain[0], yDomain[1], plot.y + plot.height, plot.y);
+      return `${index === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(' ');
+
+  return card(rect, 'Tripartite Response Spectrum: pSv', (
     <g>
-      <text x={rect.x + rect.width - 20} y={rect.y + 30} textAnchor="end" fontSize="13" fontWeight="800" fill="#667085">Damping h = {(settings.dampingRatio * 100).toFixed(1)}%</text>
-      <rect x={plot.x} y={plot.y} width={plot.width} height={plot.height} fill="#ffffff" stroke="#667085" />
+      <defs>
+        <clipPath id={clipId}>
+          <rect x={plot.x} y={plot.y} width={plot.width} height={plot.height} />
+        </clipPath>
+      </defs>
+      <text x={rect.x + rect.width - 18} y={rect.y + 27} textAnchor="end" fontSize="12" fontWeight="700" fill="#374151">Damping h = {(settings.dampingRatio * 100).toFixed(1)}%</text>
+      <rect x={plot.x} y={plot.y} width={plot.width} height={plot.height} fill="#ffffff" stroke="#111827" strokeWidth="1" />
       {xTicks.map((tick) => {
         const x = scaleLog(tick, xDomain[0], xDomain[1], plot.x, plot.x + plot.width);
         return (
           <g key={`x-${tick}`}>
-            <line x1={x} y1={plot.y} x2={x} y2={plot.y + plot.height} stroke="#e5e7eb" />
-            <text x={x} y={plot.y + plot.height + 18} textAnchor="middle" fontSize="11" fontWeight="700" fill="#667085">{formatNumber(tick, 3)}</text>
+            <line x1={x} y1={plot.y} x2={x} y2={plot.y + plot.height} stroke="#e5e7eb" strokeWidth="0.6" />
+            <text x={x} y={plot.y + plot.height + 17} textAnchor="middle" fontSize="10.5" fontWeight="600" fill="#374151">{formatNumber(tick, 3)}</text>
           </g>
         );
       })}
@@ -392,21 +349,74 @@ function renderResponsePanel(rect: Rect, series: readonly SeriesSpec[], settings
         const y = scaleLog(tick, yDomain[0], yDomain[1], plot.y + plot.height, plot.y);
         return (
           <g key={`y-${tick}`}>
-            <line x1={plot.x} y1={y} x2={plot.x + plot.width} y2={y} stroke="#e5e7eb" />
-            <text x={plot.x - 9} y={y + 4} textAnchor="end" fontSize="11" fontWeight="700" fill="#667085">{formatNumber(tick, 3)}</text>
+            <line x1={plot.x} y1={y} x2={plot.x + plot.width} y2={y} stroke="#e5e7eb" strokeWidth="0.6" />
+            <text x={plot.x - 9} y={y + 4} textAnchor="end" fontSize="10.5" fontWeight="600" fill="#374151">{formatNumber(tick, 3)}</text>
           </g>
         );
       })}
-      {series.map((entry) => (
-        <path key={entry.name} d={linePath(entry, plot, xDomain, yDomain)} fill="none" stroke={entry.color} strokeWidth="2" />
-      ))}
-      <text x={plot.x + plot.width / 2} y={rect.y + rect.height - 16} textAnchor="middle" fontSize="13" fontWeight="800" fill="#334155">Period [s]</text>
-      <text x={rect.x + 24} y={plot.y + plot.height / 2} textAnchor="middle" fontSize="13" fontWeight="800" fill="#334155" transform={`rotate(-90 ${rect.x + 24} ${plot.y + plot.height / 2})`}>pSv [cm/s]</text>
+
+      <g clipPath={`url(#${clipId})`}>
+        {accelerationGuides.map((value) => (
+          <path
+            key={`acc-${value}`}
+            d={guidePath([
+              [xDomain[0], (value * xDomain[0]) / (2 * Math.PI)],
+              [xDomain[1], (value * xDomain[1]) / (2 * Math.PI)],
+            ])}
+            fill="none"
+            stroke="#c7cdd4"
+            strokeWidth="0.7"
+            strokeDasharray="5 5"
+          />
+        ))}
+        {displacementGuides.map((value) => (
+          <path
+            key={`disp-${value}`}
+            d={guidePath([
+              [xDomain[0], (value * 2 * Math.PI) / xDomain[0]],
+              [xDomain[1], (value * 2 * Math.PI) / xDomain[1]],
+            ])}
+            fill="none"
+            stroke="#c7cdd4"
+            strokeWidth="0.7"
+            strokeDasharray="5 5"
+          />
+        ))}
+        {series.map((entry) => (
+          <path key={entry.name} d={linePath(entry, plot, xDomain, yDomain)} fill="none" stroke={entry.color} strokeWidth="1.8" />
+        ))}
+      </g>
+
+      <text
+        x={plot.x + plot.width - 124}
+        y={plot.y + 34}
+        textAnchor="middle"
+        fontSize="11"
+        fontWeight="700"
+        fill="#6b7280"
+        transform={`rotate(-33 ${plot.x + plot.width - 124} ${plot.y + 34})`}
+      >
+        Sa [cm/s2]
+      </text>
+      <text
+        x={plot.x + 116}
+        y={plot.y + 34}
+        textAnchor="middle"
+        fontSize="11"
+        fontWeight="700"
+        fill="#6b7280"
+        transform={`rotate(33 ${plot.x + 116} ${plot.y + 34})`}
+      >
+        Sd [cm]
+      </text>
+
+      <text x={plot.x + plot.width / 2} y={rect.y + rect.height - 17} textAnchor="middle" fontSize="12" fontWeight="700" fill="#111827">Period [s]</text>
+      <text x={rect.x + 28} y={plot.y + plot.height / 2} textAnchor="middle" fontSize="12" fontWeight="700" fill="#111827" transform={`rotate(-90 ${rect.x + 28} ${plot.y + plot.height / 2})`}>pSv [cm/s]</text>
       <g transform={`translate(${plot.x + 16} ${plot.y + 20})`}>
         {series.map((entry, index) => (
           <g key={`legend-${entry.name}`} transform={`translate(${index * 120} 0)`}>
-            <line x1="0" y1="0" x2="24" y2="0" stroke={entry.color} strokeWidth="2" />
-            <text x="30" y="4" fontSize="12" fontWeight="800" fill="#334155">{entry.name}</text>
+            <line x1="0" y1="0" x2="24" y2="0" stroke={entry.color} strokeWidth="1.8" />
+            <text x="30" y="4" fontSize="11.5" fontWeight="700" fill="#111827">{entry.name}</text>
           </g>
         ))}
       </g>
@@ -449,7 +459,7 @@ export function ReportFigurePanel({ waveforms, peaks, responseSettings }: Report
             </select>
           </label>
         )}
-        <span className="note">Report-ready overview figure with location, intensity, distance, waveforms, and response spectrum.</span>
+        <span className="note">Paper-ready overview figure with metadata, intensity, distance, waveforms, and tripartite response spectrum.</span>
       </div>
 
       <div className="chart-card">
@@ -460,43 +470,57 @@ export function ReportFigurePanel({ waveforms, peaks, responseSettings }: Report
             <button type="button" onClick={() => svgRef.current && void downloadPng(svgRef.current, `${fileNameBase}.png`, 2)}>PNG</button>
           </div>
         </div>
-        <svg ref={svgRef} width={WIDTH} height={HEIGHT} viewBox={`0 0 ${WIDTH} ${HEIGHT}`} role="img" aria-label="Strong motion report overview">
-          <rect width={WIDTH} height={HEIGHT} fill="#f5f7fb" />
-          <rect x="0" y="0" width={WIDTH} height="74" fill="#172554" />
-          <text x="40" y="46" fontSize="30" fontWeight="900" fill="#ffffff">Strong Motion Report Overview</text>
-          <text x={WIDTH - 40} y="44" textAnchor="end" fontSize="16" fontWeight="700" fill="#dbeafe">{selectedStation.label}</text>
+        <svg
+          ref={svgRef}
+          width={WIDTH}
+          height={HEIGHT}
+          viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
+          role="img"
+          aria-label="Strong motion report overview"
+          style={{ fontFamily: FONT_FAMILY }}
+        >
+          <rect width={WIDTH} height={HEIGHT} fill="#ffffff" />
+          <rect x="20" y="20" width={WIDTH - 40} height={HEIGHT - 40} fill="none" stroke="#111827" strokeWidth="1.2" />
+          <text x="40" y="56" fontSize="24" fontWeight="700" fill="#111827">Strong Motion Record Overview</text>
+          <text x={WIDTH - 40} y="55" textAnchor="end" fontSize="14" fontWeight="600" fill="#374151">{selectedStation.label}</text>
+          <line x1="40" y1="75" x2={WIDTH - 40} y2="75" stroke="#111827" strokeWidth="0.9" />
 
-          {card({ x: 40, y: 94, width: 510, height: 250 }, 'Station and Event', (
-            textRows(58, 146, [
+          {card({ x: 40, y: 92, width: 480, height: 210 }, 'Record', (
+            textRows(58, 152, [
               ['Station', selectedStation.label],
               ['Record Time', firstWaveform.metadata.recordTime ?? '-'],
               ['Origin Time', firstWaveform.metadata.originTime ?? '-'],
+              ['Components', selectedWaveforms.map((waveform) => waveform.componentLabel).join(' / ') || '-'],
+              ['Sampling', `${formatNumber(firstWaveform.samplingHz, 4)} Hz`],
+              ['Files', `${selectedWaveforms.length}`],
+            ], 25)
+          ))}
+
+          {card({ x: 560, y: 92, width: 500, height: 210 }, 'Coordinates and Distance', (
+            textRows(578, 152, [
               ['Station Lat/Lon', `${fmt(row?.stationLat, 6)}, ${fmt(row?.stationLon, 6)}`],
               ['Source Lat/Lon', `${fmt(row?.eventLat, 6)}, ${fmt(row?.eventLon, 6)}`],
               ['Source Depth', fmt(row?.depthKm, 3, ' km')],
-              ['Sampling', `${formatNumber(firstWaveform.samplingHz, 4)} Hz`],
-            ])
+              ['Epicentral Dist.', fmt(row?.epicentralDistanceKm, 3, ' km')],
+              ['Hypocentral Dist.', fmt(row?.hypocentralDistanceKm, 3, ' km')],
+            ], 25)
           ))}
 
-          {card({ x: 575, y: 94, width: 400, height: 250 }, 'Ground Motion Strength', (
+          {card({ x: 1100, y: 92, width: 460, height: 210 }, 'Ground Motion Strength', (
             <g>
-              {textRows(593, 146, [
+              {textRows(1118, 152, [
                 ['JMA Intensity', selectedIntensity.available ? formatNumber(selectedIntensity.intensity, 3) : '-'],
                 ['Shindo Class', selectedIntensity.available ? selectedIntensity.classLabel : '-'],
                 ['PGA', pga ? `${formatNumber(pga.value, 4)} cm/s2 (${pga.component})` : '-'],
                 ['PGV', pgv ? `${formatNumber(pgv.value, 4)} cm/s (${pgv.component})` : '-'],
                 ['PGD', pgd ? `${formatNumber(pgd.value, 4)} cm (${pgd.component})` : '-'],
-                ['Epicentral Dist.', fmt(row?.epicentralDistanceKm, 3, ' km')],
-                ['Hypocentral Dist.', fmt(row?.hypocentralDistanceKm, 3, ' km')],
-              ], 27)}
+              ], 25)}
             </g>
           ))}
 
-          {card({ x: 1000, y: 94, width: 560, height: 250 }, 'Observation Location', renderLocationPlot({ x: 1000, y: 94, width: 560, height: 250 }, selectedStation))}
-
-          {renderWaveformPanel({ x: 40, y: 374, width: 730, height: 310 }, 'Acceleration Waveforms', selectedWaveforms, 'acceleration')}
-          {renderWaveformPanel({ x: 830, y: 374, width: 730, height: 310 }, 'Velocity Waveforms', selectedWaveforms, 'velocity')}
-          {renderResponsePanel({ x: 40, y: 714, width: 1520, height: 380 }, response, responseSettings)}
+          {renderWaveformPanel({ x: 40, y: 330, width: 730, height: 300 }, 'Acceleration Waveforms', selectedWaveforms, 'acceleration')}
+          {renderWaveformPanel({ x: 830, y: 330, width: 730, height: 300 }, 'Velocity Waveforms', selectedWaveforms, 'velocity')}
+          {renderResponsePanel({ x: 40, y: 658, width: 1520, height: 420 }, response, responseSettings)}
         </svg>
       </div>
     </div>
