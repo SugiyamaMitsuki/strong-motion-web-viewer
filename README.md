@@ -67,6 +67,9 @@ https://sugiyamamitsuki.github.io/strong-motion-web-viewer/
 - Location and distance tools
   - Source latitude, source longitude, source depth, station latitude, and station longitude can be manually edited
   - Epicentral distance and hypocentral distance are calculated
+- Report overview figure
+  - Combines observation location, latitude/longitude, distances, ground motion strength, acceleration waveforms, velocity waveforms, and response spectrum in one report-ready figure
+  - Exports the overview figure as SVG or PNG
 - Figure export
   - SVG
   - PNG
@@ -149,6 +152,7 @@ src/analysis/jmaIntensity.ts                JMA seismic intensity
 src/components/LocationDistancePanel.tsx    Location input and distance display
 src/components/ManualFormatImportPanel.tsx  UI for unknown text formats
 src/components/ParticleOrbitPanel.tsx       Particle orbit view
+src/components/ReportFigurePanel.tsx        Report-ready overview figure
 src/components/StationMap.tsx               Station map
 src/components/SvgChart.tsx                 SVG chart and PNG/SVG export
 src/export/                                 CSV/JSON/ZIP export
