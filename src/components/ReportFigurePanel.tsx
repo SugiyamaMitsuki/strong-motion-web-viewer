@@ -514,7 +514,7 @@ export function ReportFigurePanel({ waveforms, peaks, responseSettings }: Report
           {card({ x: 790, y: 94, width: 270, height: 180 }, 'Ground Motion Strength', (
             <g>
               {textRows(790, 148, [
-                ['JMA Intensity', selectedIntensity.available ? formatNumber(selectedIntensity.intensity, 3) : '-'],
+                ['JMA Intensity', selectedIntensity.available ? formatNumber(selectedIntensity.intensity, 1) : '-'],
                 ['Shindo Class', selectedIntensity.available ? selectedIntensity.classLabel : '-'],
                 ['PGA', pga ? `${formatNumber(pga.value, 4)} cm/s2 (${pga.component})` : '-'],
                 ['PGV', pgv ? `${formatNumber(pgv.value, 4)} cm/s (${pgv.component})` : '-'],

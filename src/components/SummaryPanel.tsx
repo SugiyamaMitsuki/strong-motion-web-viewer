@@ -32,7 +32,7 @@ export function SummaryPanel({ records, onRecordsChange, peaks, intensity }: Sum
         <h2>JMA Intensity</h2>
         {intensity.available ? (
           <dl>
-            <dt>Instrumental Intensity</dt><dd className="large-number">{formatNumber(intensity.intensity, 3)}</dd>
+            <dt>Instrumental Intensity</dt><dd className="large-number">{formatNumber(intensity.intensity, 1)}</dd>
             <dt>Shindo Class</dt><dd className="large-number">{intensity.classLabel}</dd>
             <dt>Threshold Acceleration</dt><dd>{formatNumber(intensity.thresholdAcceleration, 4)} cm/s²</dd>
             <dt>Cumulative Duration</dt><dd>{formatNumber(intensity.durationAboveThreshold, 3)} s</dd>

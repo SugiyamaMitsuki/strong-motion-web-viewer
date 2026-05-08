@@ -16,6 +16,12 @@ function classLabelFromIntensity(intensity: number): string {
   return '7';
 }
 
+function officialJmaInstrumentalIntensity(rawIntensity: number): number {
+  if (!Number.isFinite(rawIntensity)) return Number.NaN;
+  const roundedToSecondDecimal = Math.round(rawIntensity * 100) / 100;
+  return Math.floor(roundedToSecondDecimal * 10) / 10;
+}
+
 function jmaFilterGain(frequencyHz: number): number {
   if (frequencyHz <= 0) return 0;
 
@@ -135,10 +141,11 @@ export function computeJmaIntensity(waveforms: DerivedWaveform[]): JmaIntensityR
     };
   }
 
-  const intensity = 2 * Math.log10(threshold) + 0.94;
+  const rawIntensity = 2 * Math.log10(threshold) + 0.94;
+  const intensity = officialJmaInstrumentalIntensity(rawIntensity);
   return {
     available: true,
-    intensity: Number(intensity.toFixed(3)),
+    intensity,
     classLabel: classLabelFromIntensity(intensity),
     thresholdAcceleration: threshold,
     durationAboveThreshold: requiredSamples * targetDt,
