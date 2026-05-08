@@ -34,8 +34,8 @@ interface SeriesSpec {
   color: string;
 }
 
-const WIDTH = 1600;
-const HEIGHT = 1120;
+const WIDTH = 1120;
+const HEIGHT = 1584;
 const FONT_FAMILY = 'Arial, Helvetica, sans-serif';
 const COLORS: Record<string, string> = {
   NS: '#D55E00',
@@ -247,9 +247,8 @@ function fmt(value: number | undefined, digits = 4, suffix = ''): string {
 function card(rect: Rect, title: string, children: JSX.Element): JSX.Element {
   return (
     <g>
-      <rect x={rect.x} y={rect.y} width={rect.width} height={rect.height} fill="#ffffff" stroke="#1f2937" strokeWidth="1.2" />
-      <line x1={rect.x} y1={rect.y + 42} x2={rect.x + rect.width} y2={rect.y + 42} stroke="#1f2937" strokeWidth="0.8" />
-      <text x={rect.x + 16} y={rect.y + 27} fontSize="16" fontWeight="700" fill="#111827">{title}</text>
+      <text x={rect.x} y={rect.y + 18} fontSize="15" fontWeight="700" fill="#111827">{title}</text>
+      <line x1={rect.x} y1={rect.y + 30} x2={rect.x + rect.width} y2={rect.y + 30} stroke="#111827" strokeWidth="0.75" />
       {children}
     </g>
   );
@@ -260,8 +259,8 @@ function textRows(x: number, y: number, rows: Array<[string, string]>, rowHeight
     <g>
       {rows.map(([label, value], index) => (
         <g key={label} transform={`translate(${x} ${y + index * rowHeight})`}>
-          <text x="0" y="0" fontSize="12.5" fontWeight="700" fill="#4b5563">{label}</text>
-          <text x="168" y="0" fontSize="13" fontWeight="600" fill="#111827">{value}</text>
+          <text x="0" y="0" fontSize="11.5" fontWeight="700" fill="#4b5563">{label}</text>
+          <text x="132" y="0" fontSize="12" fontWeight="600" fill="#111827">{value}</text>
         </g>
       ))}
     </g>
@@ -270,9 +269,9 @@ function textRows(x: number, y: number, rows: Array<[string, string]>, rowHeight
 
 function renderWaveformPanel(rect: Rect, title: string, waveforms: readonly DerivedWaveform[], quantity: Quantity): JSX.Element {
   const ordered = [...waveforms].sort((a, b) => componentRank(a.component) - componentRank(b.component));
-  const plotTop = rect.y + 56;
-  const rowHeight = (rect.height - 88) / Math.max(1, ordered.length);
-  const plotWidth = rect.width - 118;
+  const plotTop = rect.y + 44;
+  const rowHeight = (rect.height - 72) / Math.max(1, ordered.length);
+  const plotWidth = rect.width - 120;
 
   return card(rect, title, (
     <g>
@@ -291,23 +290,31 @@ function renderWaveformPanel(rect: Rect, title: string, waveforms: readonly Deri
         const color = COLORS[waveform.component] ?? COLORS.OTHER;
         return (
           <g key={`${quantity}-${waveform.sourceRecordId}`}>
-            <text x={rect.x + 18} y={rowRect.y + rowRect.height / 2 + 5} fontSize="13" fontWeight="700" fill={color}>{waveform.componentLabel}</text>
-            <rect x={rowRect.x} y={rowRect.y} width={rowRect.width} height={rowRect.height} fill="#ffffff" stroke="#374151" strokeWidth="0.7" />
-            <line x1={rowRect.x} y1={rowRect.y + rowRect.height / 2} x2={rowRect.x + rowRect.width} y2={rowRect.y + rowRect.height / 2} stroke="#9ca3af" strokeWidth="0.6" />
-            <path d={timePath(waveform.time, values, rowRect, maxAbs)} fill="none" stroke={color} strokeWidth="1.15" />
+            <text x={rect.x + 2} y={rowRect.y + rowRect.height / 2 + 5} fontSize="12.5" fontWeight="700" fill={color}>{waveform.componentLabel}</text>
+            <line x1={rowRect.x} y1={rowRect.y + rowRect.height / 2} x2={rowRect.x + rowRect.width} y2={rowRect.y + rowRect.height / 2} stroke="#9ca3af" strokeWidth="0.55" />
+            <line x1={rowRect.x} y1={rowRect.y + rowRect.height} x2={rowRect.x + rowRect.width} y2={rowRect.y + rowRect.height} stroke="#e5e7eb" strokeWidth="0.5" />
+            <path d={timePath(waveform.time, values, rowRect, maxAbs)} fill="none" stroke={color} strokeWidth="1.05" />
             <text x={rowRect.x + rowRect.width - 7} y={rowRect.y + 14} textAnchor="end" fontSize="10.5" fontWeight="600" fill="#374151">
               Max {formatNumber(peak.value, 4)} {quantityUnit(quantity)} at {formatNumber(peak.time, 3)} s
             </text>
           </g>
         );
       })}
-      <text x={rect.x + rect.width / 2} y={rect.y + rect.height - 15} textAnchor="middle" fontSize="11.5" fontWeight="700" fill="#374151">Time [s]</text>
+      <text x={rect.x + rect.width / 2} y={rect.y + rect.height - 10} textAnchor="middle" fontSize="11" fontWeight="700" fill="#374151">Time [s]</text>
     </g>
   ));
 }
 
 function renderResponsePanel(rect: Rect, series: readonly SeriesSpec[], settings: ResponseSpectrumSettings): JSX.Element {
-  const plot: Rect = { x: rect.x + 82, y: rect.y + 62, width: rect.width - 122, height: rect.height - 116 };
+  const leftAxis = 78;
+  const rightPad = 30;
+  const plotSize = Math.min(rect.width - leftAxis - rightPad, rect.height - 98);
+  const plot: Rect = {
+    x: rect.x + leftAxis + (rect.width - leftAxis - rightPad - plotSize) / 2,
+    y: rect.y + 48,
+    width: plotSize,
+    height: plotSize,
+  };
   const xDomain: [number, number] = [
     niceLogFloor(settings.minPeriod, 0.01),
     niceLogCeil(settings.maxPeriod, 10),
@@ -334,7 +341,7 @@ function renderResponsePanel(rect: Rect, series: readonly SeriesSpec[], settings
           <rect x={plot.x} y={plot.y} width={plot.width} height={plot.height} />
         </clipPath>
       </defs>
-      <text x={rect.x + rect.width - 18} y={rect.y + 27} textAnchor="end" fontSize="12" fontWeight="700" fill="#374151">Damping h = {(settings.dampingRatio * 100).toFixed(1)}%</text>
+      <text x={rect.x + rect.width - 2} y={rect.y + 18} textAnchor="end" fontSize="11.5" fontWeight="700" fill="#374151">Damping h = {(settings.dampingRatio * 100).toFixed(1)}%</text>
       <rect x={plot.x} y={plot.y} width={plot.width} height={plot.height} fill="#ffffff" stroke="#111827" strokeWidth="1" />
       {xTicks.map((tick) => {
         const x = scaleLog(tick, xDomain[0], xDomain[1], plot.x, plot.x + plot.width);
@@ -459,7 +466,7 @@ export function ReportFigurePanel({ waveforms, peaks, responseSettings }: Report
             </select>
           </label>
         )}
-        <span className="note">Paper-ready overview figure with metadata, intensity, distance, waveforms, and tripartite response spectrum.</span>
+        <span className="note">A4 portrait overview figure with metadata, intensity, distance, stacked waveforms, and tripartite response spectrum.</span>
       </div>
 
       <div className="chart-card">
@@ -480,47 +487,46 @@ export function ReportFigurePanel({ waveforms, peaks, responseSettings }: Report
           style={{ fontFamily: FONT_FAMILY }}
         >
           <rect width={WIDTH} height={HEIGHT} fill="#ffffff" />
-          <rect x="20" y="20" width={WIDTH - 40} height={HEIGHT - 40} fill="none" stroke="#111827" strokeWidth="1.2" />
-          <text x="40" y="56" fontSize="24" fontWeight="700" fill="#111827">Strong Motion Record Overview</text>
-          <text x={WIDTH - 40} y="55" textAnchor="end" fontSize="14" fontWeight="600" fill="#374151">{selectedStation.label}</text>
-          <line x1="40" y1="75" x2={WIDTH - 40} y2="75" stroke="#111827" strokeWidth="0.9" />
+          <text x="60" y="54" fontSize="23" fontWeight="700" fill="#111827">Strong Motion Record Overview</text>
+          <text x={WIDTH - 60} y="53" textAnchor="end" fontSize="13.5" fontWeight="600" fill="#374151">{selectedStation.label}</text>
+          <line x1="60" y1="74" x2={WIDTH - 60} y2="74" stroke="#111827" strokeWidth="0.9" />
 
-          {card({ x: 40, y: 92, width: 480, height: 210 }, 'Record', (
-            textRows(58, 152, [
+          {card({ x: 60, y: 94, width: 310, height: 180 }, 'Record', (
+            textRows(60, 148, [
               ['Station', selectedStation.label],
               ['Record Time', firstWaveform.metadata.recordTime ?? '-'],
               ['Origin Time', firstWaveform.metadata.originTime ?? '-'],
               ['Components', selectedWaveforms.map((waveform) => waveform.componentLabel).join(' / ') || '-'],
               ['Sampling', `${formatNumber(firstWaveform.samplingHz, 4)} Hz`],
               ['Files', `${selectedWaveforms.length}`],
-            ], 25)
+            ], 22)
           ))}
 
-          {card({ x: 560, y: 92, width: 500, height: 210 }, 'Coordinates and Distance', (
-            textRows(578, 152, [
+          {card({ x: 400, y: 94, width: 360, height: 180 }, 'Coordinates and Distance', (
+            textRows(400, 148, [
               ['Station Lat/Lon', `${fmt(row?.stationLat, 6)}, ${fmt(row?.stationLon, 6)}`],
               ['Source Lat/Lon', `${fmt(row?.eventLat, 6)}, ${fmt(row?.eventLon, 6)}`],
               ['Source Depth', fmt(row?.depthKm, 3, ' km')],
               ['Epicentral Dist.', fmt(row?.epicentralDistanceKm, 3, ' km')],
               ['Hypocentral Dist.', fmt(row?.hypocentralDistanceKm, 3, ' km')],
-            ], 25)
+            ], 22)
           ))}
 
-          {card({ x: 1100, y: 92, width: 460, height: 210 }, 'Ground Motion Strength', (
+          {card({ x: 790, y: 94, width: 270, height: 180 }, 'Ground Motion Strength', (
             <g>
-              {textRows(1118, 152, [
+              {textRows(790, 148, [
                 ['JMA Intensity', selectedIntensity.available ? formatNumber(selectedIntensity.intensity, 3) : '-'],
                 ['Shindo Class', selectedIntensity.available ? selectedIntensity.classLabel : '-'],
                 ['PGA', pga ? `${formatNumber(pga.value, 4)} cm/s2 (${pga.component})` : '-'],
                 ['PGV', pgv ? `${formatNumber(pgv.value, 4)} cm/s (${pgv.component})` : '-'],
                 ['PGD', pgd ? `${formatNumber(pgd.value, 4)} cm (${pgd.component})` : '-'],
-              ], 25)}
+              ], 22)}
             </g>
           ))}
 
-          {renderWaveformPanel({ x: 40, y: 330, width: 730, height: 300 }, 'Acceleration Waveforms', selectedWaveforms, 'acceleration')}
-          {renderWaveformPanel({ x: 830, y: 330, width: 730, height: 300 }, 'Velocity Waveforms', selectedWaveforms, 'velocity')}
-          {renderResponsePanel({ x: 40, y: 658, width: 1520, height: 420 }, response, responseSettings)}
+          {renderWaveformPanel({ x: 60, y: 310, width: 1000, height: 245 }, 'Acceleration Waveforms', selectedWaveforms, 'acceleration')}
+          {renderWaveformPanel({ x: 60, y: 592, width: 1000, height: 245 }, 'Velocity Waveforms', selectedWaveforms, 'velocity')}
+          {renderResponsePanel({ x: 175, y: 875, width: 770, height: 650 }, response, responseSettings)}
         </svg>
       </div>
     </div>
