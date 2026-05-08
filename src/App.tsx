@@ -27,10 +27,10 @@ const defaultSettings: AppSettings = {
   },
   preprocess: {
     removeMean: true,
-    detrend: false,
-    applyHighpass: false,
+    detrend: true,
+    applyHighpass: true,
     highpassHz: 0.05,
-    applyLowpass: false,
+    applyLowpass: true,
     lowpassHz: 20,
     correctIntegrationDrift: true,
   },
