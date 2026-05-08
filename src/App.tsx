@@ -14,12 +14,13 @@ import { ResponseSpectrumPanel } from './components/ResponseSpectrumPanel';
 import { SettingsPanel } from './components/SettingsPanel';
 import { SummaryPanel } from './components/SummaryPanel';
 import { TimeHistoryPanel } from './components/TimeHistoryPanel';
+import { WaveletPanel } from './components/WaveletPanel';
 import { parseWaveformFile } from './parsers';
 import type { AppSettings, WaveformRecord } from './types/waveform';
 import { isSupportedWaveformFileName, makeId, readFileAsText } from './utils/file';
 import './styles.css';
 
-type TabKey = 'summary' | 'time' | 'orbit' | 'fourier' | 'hvsr' | 'response' | 'report' | 'export';
+type TabKey = 'summary' | 'time' | 'orbit' | 'fourier' | 'wavelet' | 'hvsr' | 'response' | 'report' | 'export';
 
 const defaultSettings: AppSettings = {
   csv: {
@@ -49,6 +50,7 @@ function tabLabel(tab: TabKey): string {
     case 'time': return 'Time History';
     case 'orbit': return 'Orbit';
     case 'fourier': return 'Fourier';
+    case 'wavelet': return 'Wavelet';
     case 'hvsr': return 'H/V Ratio';
     case 'response': return 'Response Spectrum';
     case 'report': return 'Report Figure';
@@ -225,7 +227,7 @@ export default function App(): JSX.Element {
 
       <section className="panel analysis-panel">
         <nav className="tabs" aria-label="Analysis views">
-          {(['summary', 'time', 'orbit', 'fourier', 'hvsr', 'response', 'report', 'export'] as TabKey[]).map((tab) => (
+          {(['summary', 'time', 'orbit', 'fourier', 'wavelet', 'hvsr', 'response', 'report', 'export'] as TabKey[]).map((tab) => (
             <button
               key={tab}
               type="button"
@@ -242,6 +244,7 @@ export default function App(): JSX.Element {
           {activeTab === 'time' && <TimeHistoryPanel waveforms={derivedWaveforms} />}
           {activeTab === 'orbit' && <ParticleOrbitPanel waveforms={derivedWaveforms} />}
           {activeTab === 'fourier' && <FourierPanel waveforms={derivedWaveforms} />}
+          {activeTab === 'wavelet' && <WaveletPanel waveforms={derivedWaveforms} />}
           {activeTab === 'hvsr' && <HorizontalVerticalRatioPanel waveforms={derivedWaveforms} />}
           {activeTab === 'response' && <ResponseSpectrumPanel waveforms={derivedWaveforms} settings={settings.responseSpectrum} />}
           {activeTab === 'report' && (

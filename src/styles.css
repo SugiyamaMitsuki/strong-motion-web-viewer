@@ -165,6 +165,11 @@ button.danger:hover:not(:disabled) {
   gap: 10px;
 }
 
+.inline-controls {
+  flex-wrap: wrap;
+  align-items: flex-end;
+}
+
 .panel-header,
 .chart-toolbar {
   justify-content: space-between;

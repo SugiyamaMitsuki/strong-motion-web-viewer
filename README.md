@@ -41,6 +41,11 @@ https://sugiyamamitsuki.github.io/strong-motion-web-viewer/
   - Acceleration, velocity, and displacement modes
   - Square plots with equal X/Y scale
 - Fourier amplitude spectra
+- Morlet wavelet scalograms
+  - Continuous wavelet transform with Morlet wavelet `omega0 = 8`
+  - Frequency or period Y-axis display
+  - Fast / Standard / Detailed resolution options for browser-side calculation
+  - SVG and PNG export
 - Horizontal-to-vertical spectral ratio
   - Default horizontal combination follows the SESAME-style geometric mean: H/V = `sqrt(NS * EW) / UD`
   - RMS combination is also available: H/V = `sqrt((NS² + EW²) / 2) / UD`
@@ -149,6 +154,7 @@ src/parsers/customText.ts                   Manual parser for unknown text forma
 src/analysis/derive.ts                      Conversion between acceleration, velocity, and displacement
 src/analysis/distance.ts                    Epicentral and hypocentral distance
 src/analysis/fourier.ts                     Fourier amplitude spectrum
+src/analysis/wavelet.ts                     Morlet continuous wavelet transform
 src/analysis/horizontalVerticalRatio.ts     Horizontal-to-vertical spectral ratio
 src/analysis/orbit.ts                       Particle orbit calculations
 src/analysis/responseSpectrum.ts            Nigam-Jennings response spectrum
@@ -156,6 +162,7 @@ src/analysis/jmaIntensity.ts                JMA seismic intensity
 src/components/LocationDistancePanel.tsx    Location input and distance display
 src/components/ManualFormatImportPanel.tsx  UI for unknown text formats
 src/components/ParticleOrbitPanel.tsx       Particle orbit view
+src/components/WaveletPanel.tsx             Wavelet scalogram view
 src/components/ReportFigurePanel.tsx        Report-ready overview figure
 src/components/StationMap.tsx               Station map
 src/components/SvgChart.tsx                 SVG chart and PNG/SVG export
