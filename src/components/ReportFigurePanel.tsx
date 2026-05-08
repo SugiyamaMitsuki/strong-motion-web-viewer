@@ -43,6 +43,12 @@ const COLORS: Record<string, string> = {
   UD: '#009E73',
   OTHER: '#CC79A7',
 };
+const LOG_SNAP_STEP = 0.25;
+
+interface LogRange {
+  minLog: number;
+  maxLog: number;
+}
 
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value);
@@ -180,16 +186,33 @@ function logTicks(min: number, max: number): number[] {
   return ticks;
 }
 
-function logPowers(min: number, max: number): number[] {
+function logMinorValues(min: number, max: number): number[] {
   if (min <= 0 || max <= min) return [];
   const values: number[] = [];
   const start = Math.floor(Math.log10(min));
   const end = Math.ceil(Math.log10(max));
   for (let exp = start; exp <= end; exp += 1) {
-    const value = 10 ** exp;
-    if (value >= min * 0.999 && value <= max * 1.001) values.push(value);
+    for (let multiplier = 1; multiplier < 10; multiplier += 1) {
+      const value = multiplier * 10 ** exp;
+      if (value >= min * 0.999 && value <= max * 1.001) values.push(value);
+    }
   }
   return values;
+}
+
+function formatTick(value: number): string {
+  if (!Number.isFinite(value)) return '';
+  const abs = Math.abs(value);
+  if (abs === 0) return '0';
+  if (abs < 0.01 || abs >= 10000) return value.toExponential(1);
+  if (abs < 1) return Number(value.toFixed(3)).toString();
+  if (abs < 10) return Number(value.toFixed(2)).toString();
+  if (abs < 100) return Number(value.toFixed(1)).toString();
+  return Number(value.toFixed(0)).toString();
+}
+
+function powerLabel(exponent: number): string {
+  return `10^${exponent}`;
 }
 
 function niceLogFloor(value: number, fallback: number): number {
@@ -213,15 +236,67 @@ function responseSeries(waveforms: readonly DerivedWaveform[], settings: Respons
     }));
 }
 
-function responseYDomain(series: readonly SeriesSpec[]): [number, number] {
+function log10(value: number): number {
+  return Math.log(value) / Math.LN10;
+}
+
+function toLogRange(domain: [number, number]): LogRange {
+  return { minLog: log10(domain[0]), maxLog: log10(domain[1]) };
+}
+
+function fromLogRange(range: LogRange): [number, number] {
+  return [10 ** range.minLog, 10 ** range.maxLog];
+}
+
+function snapLogRange(range: LogRange): LogRange {
+  return {
+    minLog: Math.floor(range.minLog / LOG_SNAP_STEP) * LOG_SNAP_STEP,
+    maxLog: Math.ceil(range.maxLog / LOG_SNAP_STEP) * LOG_SNAP_STEP,
+  };
+}
+
+function expandLogRange(range: LogRange, targetSpan: number): LogRange {
+  const span = range.maxLog - range.minLog;
+  if (span >= targetSpan) return range;
+  const missing = targetSpan - span;
+  return {
+    minLog: range.minLog - missing / 2,
+    maxLog: range.maxLog + missing / 2,
+  };
+}
+
+function responseSeriesRange(series: readonly SeriesSpec[]): { min: number; max: number } | undefined {
+  let min = Infinity;
   let max = 0;
   for (const entry of series) {
     for (const value of entry.y) {
-      if (Number.isFinite(value) && value > max) max = value;
+      if (!Number.isFinite(value) || value <= 0) continue;
+      if (value < min) min = value;
+      if (value > max) max = value;
     }
   }
-  const upper = niceLogCeil(max * 1.2, 10);
-  return [upper / 1000, upper];
+  return max > 0 && Number.isFinite(min) ? { min, max } : undefined;
+}
+
+function tripartiteDomains(series: readonly SeriesSpec[], settings: ResponseSpectrumSettings): { xDomain: [number, number]; yDomain: [number, number] } {
+  const xDomain: [number, number] = [
+    niceLogFloor(Math.min(settings.minPeriod, 0.01), 0.01),
+    niceLogCeil(Math.max(settings.maxPeriod, 10), 10),
+  ];
+  const range = responseSeriesRange(series);
+  const yRange = range
+    ? snapLogRange({
+      minLog: log10(range.min) - 0.08,
+      maxLog: log10(range.max) + 0.08,
+    })
+    : { minLog: -2, maxLog: 1 };
+  const xRange = toLogRange(xDomain);
+  const targetSpan = Math.max(xRange.maxLog - xRange.minLog, yRange.maxLog - yRange.minLog);
+
+  return {
+    xDomain: fromLogRange(expandLogRange(xRange, targetSpan)),
+    yDomain: fromLogRange(expandLogRange(yRange, targetSpan)),
+  };
 }
 
 function linePath(series: SeriesSpec, rect: Rect, xDomain: [number, number], yDomain: [number, number]): string {
@@ -314,24 +389,35 @@ function renderResponsePanel(rect: Rect, series: readonly SeriesSpec[], settings
     width: plotSize,
     height: plotSize,
   };
-  const xDomain: [number, number] = [
-    niceLogFloor(settings.minPeriod, 0.01),
-    niceLogCeil(settings.maxPeriod, 10),
-  ];
-  const yDomain = responseYDomain(series);
+  const { xDomain, yDomain } = tripartiteDomains(series, settings);
   const xTicks = logTicks(xDomain[0], xDomain[1]);
   const yTicks = logTicks(yDomain[0], yDomain[1]);
-  const accelerationGuides = logPowers((yDomain[0] * 2 * Math.PI) / xDomain[1], (yDomain[1] * 2 * Math.PI) / xDomain[0]);
-  const displacementGuides = logPowers((yDomain[0] * xDomain[0]) / (2 * Math.PI), (yDomain[1] * xDomain[1]) / (2 * Math.PI));
+  const tripartiteScaleValues = logMinorValues(yDomain[0] / 1000, yDomain[1] * 1000);
+  const tripartitePeriodValues = logMinorValues(xDomain[0], xDomain[1]);
+  const accelerationLabelExponents = Array.from(
+    { length: Math.max(0, Math.ceil(Math.log10(yDomain[1])) + 2 - Math.floor(Math.log10(yDomain[0])) + 1) },
+    (_, i) => Math.floor(Math.log10(yDomain[0])) + i,
+  );
+  const displacementLabelExponents = Array.from(
+    { length: Math.max(0, Math.ceil(Math.log10(yDomain[1])) - 1 - (Math.floor(Math.log10(yDomain[0])) - 2) + 1) },
+    (_, i) => Math.floor(Math.log10(yDomain[0])) - 2 + i,
+  );
   const clipId = 'report-tripartite-clip';
 
   const guidePath = (points: Array<[number, number]>): string => points
+    .filter(([xValue, yValue]) => Number.isFinite(xValue) && Number.isFinite(yValue) && xValue > 0 && yValue > 0)
     .map(([xValue, yValue], index) => {
       const x = scaleLog(xValue, xDomain[0], xDomain[1], plot.x, plot.x + plot.width);
       const y = scaleLog(yValue, yDomain[0], yDomain[1], plot.y + plot.height, plot.y);
       return `${index === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`;
     })
     .join(' ');
+  const insideDomain = (xValue: number, yValue: number): boolean => (
+    xValue >= xDomain[0]
+    && xValue <= xDomain[1]
+    && yValue >= yDomain[0]
+    && yValue <= yDomain[1]
+  );
 
   return card(rect, 'Tripartite Response Spectrum: pSv', (
     <g>
@@ -346,8 +432,7 @@ function renderResponsePanel(rect: Rect, series: readonly SeriesSpec[], settings
         const x = scaleLog(tick, xDomain[0], xDomain[1], plot.x, plot.x + plot.width);
         return (
           <g key={`x-${tick}`}>
-            <line x1={x} y1={plot.y} x2={x} y2={plot.y + plot.height} stroke="#e5e7eb" strokeWidth="0.6" />
-            <text x={x} y={plot.y + plot.height + 17} textAnchor="middle" fontSize="10.5" fontWeight="600" fill="#374151">{formatNumber(tick, 3)}</text>
+            <text x={x} y={plot.y + plot.height + 17} textAnchor="middle" fontSize="10.5" fontWeight="600" fill="#374151">{formatTick(tick)}</text>
           </g>
         );
       })}
@@ -355,37 +440,56 @@ function renderResponsePanel(rect: Rect, series: readonly SeriesSpec[], settings
         const y = scaleLog(tick, yDomain[0], yDomain[1], plot.y + plot.height, plot.y);
         return (
           <g key={`y-${tick}`}>
-            <line x1={plot.x} y1={y} x2={plot.x + plot.width} y2={y} stroke="#e5e7eb" strokeWidth="0.6" />
-            <text x={plot.x - 9} y={y + 4} textAnchor="end" fontSize="10.5" fontWeight="600" fill="#374151">{formatNumber(tick, 3)}</text>
+            <text x={plot.x - 9} y={y + 4} textAnchor="end" fontSize="10.5" fontWeight="600" fill="#374151">{formatTick(tick)}</text>
           </g>
         );
       })}
 
       <g clipPath={`url(#${clipId})`}>
-        {accelerationGuides.map((value) => (
-          <path
-            key={`acc-${value}`}
-            d={guidePath([
-              [xDomain[0], (value * xDomain[0]) / (2 * Math.PI)],
-              [xDomain[1], (value * xDomain[1]) / (2 * Math.PI)],
-            ])}
-            fill="none"
-            stroke="#c7cdd4"
-            strokeWidth="0.7"
-            strokeDasharray="5 5"
-          />
+        {tripartiteScaleValues.map((value) => (
+          <g key={`trip-${value}`}>
+            <path
+              d={guidePath([
+                [xDomain[0], (value * xDomain[0]) / (2 * Math.PI)],
+                [xDomain[1], (value * xDomain[1]) / (2 * Math.PI)],
+              ])}
+              fill="none"
+              stroke="#98a2b3"
+              strokeWidth="0.7"
+              strokeDasharray="4 4"
+            />
+            <path
+              d={guidePath([
+                [xDomain[0], (value * 2 * Math.PI) / xDomain[0]],
+                [xDomain[1], (value * 2 * Math.PI) / xDomain[1]],
+              ])}
+              fill="none"
+              stroke="#98a2b3"
+              strokeWidth="0.7"
+              strokeDasharray="4 4"
+            />
+            <path
+              d={guidePath([
+                [xDomain[0], value],
+                [xDomain[1], value],
+              ])}
+              fill="none"
+              stroke="#98a2b3"
+              strokeWidth="0.7"
+              strokeDasharray="4 4"
+            />
+          </g>
         ))}
-        {displacementGuides.map((value) => (
-          <path
-            key={`disp-${value}`}
-            d={guidePath([
-              [xDomain[0], (value * 2 * Math.PI) / xDomain[0]],
-              [xDomain[1], (value * 2 * Math.PI) / xDomain[1]],
-            ])}
-            fill="none"
-            stroke="#c7cdd4"
+        {tripartitePeriodValues.map((period) => (
+          <line
+            key={`period-${period}`}
+            x1={scaleLog(period, xDomain[0], xDomain[1], plot.x, plot.x + plot.width)}
+            y1={plot.y}
+            x2={scaleLog(period, xDomain[0], xDomain[1], plot.x, plot.x + plot.width)}
+            y2={plot.y + plot.height}
+            stroke="#98a2b3"
             strokeWidth="0.7"
-            strokeDasharray="5 5"
+            strokeDasharray="4 4"
           />
         ))}
         {series.map((entry) => (
@@ -393,28 +497,62 @@ function renderResponsePanel(rect: Rect, series: readonly SeriesSpec[], settings
         ))}
       </g>
 
-      <text
-        x={plot.x + plot.width - 124}
-        y={plot.y + 34}
-        textAnchor="middle"
-        fontSize="11"
-        fontWeight="700"
-        fill="#6b7280"
-        transform={`rotate(-33 ${plot.x + plot.width - 124} ${plot.y + 34})`}
-      >
-        Sa [cm/s2]
-      </text>
-      <text
-        x={plot.x + 116}
-        y={plot.y + 34}
-        textAnchor="middle"
-        fontSize="11"
-        fontWeight="700"
-        fill="#6b7280"
-        transform={`rotate(33 ${plot.x + 116} ${plot.y + 34})`}
-      >
-        Sd [cm]
-      </text>
+      {accelerationLabelExponents.map((exponent) => {
+        const acceleration = 10 ** exponent;
+        let xValue = xDomain[1];
+        let yValue = (acceleration * xValue) / (2 * Math.PI);
+        if (yValue > yDomain[1]) {
+          yValue = yDomain[1] / 1.08;
+          xValue = (2 * Math.PI * yValue) / acceleration;
+        }
+        if (!insideDomain(xValue, yValue)) return null;
+        const x = scaleLog(xValue, xDomain[0], xDomain[1], plot.x, plot.x + plot.width);
+        const y = scaleLog(yValue, yDomain[0], yDomain[1], plot.y + plot.height, plot.y);
+        return (
+          <text
+            key={`acc-label-${exponent}`}
+            x={x}
+            y={y}
+            textAnchor="middle"
+            fontSize="9.5"
+            fontWeight="600"
+            fill="#667085"
+            transform={`rotate(-38 ${x} ${y})`}
+          >
+            {exponent === accelerationLabelExponents[accelerationLabelExponents.length - 1]
+              ? `${powerLabel(exponent)} cm/s^2`
+              : powerLabel(exponent)}
+          </text>
+        );
+      })}
+      {displacementLabelExponents.map((exponent) => {
+        const displacement = 10 ** exponent;
+        let xValue = xDomain[0];
+        let yValue = (displacement * 2 * Math.PI) / xValue;
+        if (yValue > yDomain[1]) {
+          yValue = yDomain[1] / 1.06;
+          xValue = (2 * Math.PI * displacement) / yValue;
+        }
+        if (!insideDomain(xValue, yValue)) return null;
+        const x = scaleLog(xValue, xDomain[0], xDomain[1], plot.x, plot.x + plot.width);
+        const y = scaleLog(yValue, yDomain[0], yDomain[1], plot.y + plot.height, plot.y);
+        return (
+          <text
+            key={`disp-label-${exponent}`}
+            x={x}
+            y={y}
+            textAnchor="middle"
+            fontSize="9.5"
+            fontWeight="600"
+            fill="#667085"
+            transform={`rotate(38 ${x} ${y})`}
+          >
+            {exponent === displacementLabelExponents[displacementLabelExponents.length - 1]
+              ? `${powerLabel(exponent)} cm`
+              : powerLabel(exponent)}
+          </text>
+        );
+      })}
 
       <text x={plot.x + plot.width / 2} y={rect.y + rect.height - 17} textAnchor="middle" fontSize="12" fontWeight="700" fill="#111827">Period [s]</text>
       <text x={rect.x + 28} y={plot.y + plot.height / 2} textAnchor="middle" fontSize="12" fontWeight="700" fill="#111827" transform={`rotate(-90 ${rect.x + 28} ${plot.y + plot.height / 2})`}>pSv [cm/s]</text>
