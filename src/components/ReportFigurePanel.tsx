@@ -172,6 +172,12 @@ function timePath(time: readonly number[], values: readonly number[], rect: Rect
   }).join(' ');
 }
 
+function linearTicks(min: number, max: number, count: number): number[] {
+  if (!Number.isFinite(min) || !Number.isFinite(max) || max <= min) return [];
+  const n = Math.max(2, count);
+  return Array.from({ length: n }, (_, index) => min + ((max - min) * index) / (n - 1));
+}
+
 function logTicks(min: number, max: number): number[] {
   if (min <= 0 || max <= min) return [];
   const ticks: number[] = [];
@@ -345,8 +351,16 @@ function textRows(x: number, y: number, rows: Array<[string, string]>, rowHeight
 function renderWaveformPanel(rect: Rect, title: string, waveforms: readonly DerivedWaveform[], quantity: Quantity): JSX.Element {
   const ordered = [...waveforms].sort((a, b) => componentRank(a.component) - componentRank(b.component));
   const plotTop = rect.y + 44;
-  const rowHeight = (rect.height - 86) / Math.max(1, ordered.length);
+  const rowHeight = (rect.height - 102) / Math.max(1, ordered.length);
   const plotWidth = rect.width - 120;
+  const axisWaveform = ordered[0];
+  const axisValues = axisWaveform ? quantityValues(axisWaveform, quantity) : [];
+  const nForAxis = axisWaveform ? Math.min(axisWaveform.time.length, axisValues.length) : 0;
+  const timeMin = axisWaveform?.time[0] ?? 0;
+  const timeMax = nForAxis > 0 ? axisWaveform?.time[nForAxis - 1] ?? 0 : 0;
+  const axisTicks = linearTicks(timeMin, timeMax, 5);
+  const axisX = rect.x + 76;
+  const axisY = rect.y + rect.height - 24;
 
   return card(rect, title, (
     <g>
@@ -374,7 +388,21 @@ function renderWaveformPanel(rect: Rect, title: string, waveforms: readonly Deri
           </g>
         );
       })}
-      <text x={rect.x + rect.width / 2} y={rect.y + rect.height - 4} textAnchor="middle" fontSize="11" fontWeight="700" fill="#374151">Time [s]</text>
+      {axisTicks.length > 0 && (
+        <g>
+          <line x1={axisX} y1={axisY} x2={axisX + plotWidth} y2={axisY} stroke="#374151" strokeWidth="0.65" />
+          {axisTicks.map((tick) => {
+            const x = scaleLinear(tick, timeMin, timeMax, axisX, axisX + plotWidth);
+            return (
+              <g key={`${title}-tick-${tick}`}>
+                <line x1={x} y1={axisY} x2={x} y2={axisY + 4} stroke="#374151" strokeWidth="0.65" />
+                <text x={x} y={axisY + 16} textAnchor="middle" fontSize="10.5" fontWeight="600" fill="#374151">{formatTick(tick)}</text>
+              </g>
+            );
+          })}
+        </g>
+      )}
+      <text x={rect.x + rect.width / 2} y={rect.y + rect.height - 2} textAnchor="middle" fontSize="11" fontWeight="700" fill="#374151">Time [s]</text>
     </g>
   ));
 }
