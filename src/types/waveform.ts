@@ -2,7 +2,7 @@ export type Quantity = 'acceleration' | 'velocity' | 'displacement';
 
 export type ComponentCode = 'NS' | 'EW' | 'UD' | 'OTHER';
 
-export type SourceType = 'knet' | 'kiknet' | 'csv' | 'custom' | 'unknown';
+export type SourceType = 'knet' | 'kiknet' | 'jma' | 'csv' | 'custom' | 'unknown';
 
 export interface WaveformMetadata {
   originTime?: string;

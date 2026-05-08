@@ -11,6 +11,9 @@ https://sugiyamamitsuki.github.io/strong-motion-web-viewer/
 - K-NET / KiK-net file import
   - Supports files such as `*.NS`, `*.EW`, `*.UD`, `*.NS1`, `*.EW1`, and `*.UD1`
   - Reads `Scale Factor` and converts waveform values to `cm/s²` after mean removal
+- JMA strong-motion acceleration CSV import
+  - Reads `SITE CODE`, station latitude/longitude, sampling rate, unit, initial time, and NS/EW/UD component columns
+  - Uses source latitude/longitude, depth, and magnitude when they are included in the first header line
 - CSV time-history import
   - Drag and drop
   - File picker
@@ -140,6 +143,7 @@ If no time column is available, the app uses the default CSV sampling frequency 
 
 ```text
 src/parsers/knet.ts                         K-NET / KiK-net parser
+src/parsers/jma.ts                          JMA strong-motion acceleration CSV parser
 src/parsers/csv.ts                          CSV parser
 src/parsers/customText.ts                   Manual parser for unknown text formats
 src/analysis/derive.ts                      Conversion between acceleration, velocity, and displacement
