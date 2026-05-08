@@ -454,7 +454,7 @@ export function ReportFigurePanel({ waveforms, peaks, responseSettings }: Report
 
       <div className="chart-card">
         <div className="chart-toolbar">
-          <strong>Report Overview Figure</strong>
+          <span aria-hidden="true" />
           <div className="button-row compact">
             <button type="button" onClick={() => svgRef.current && downloadSvg(svgRef.current, `${fileNameBase}.svg`)}>SVG</button>
             <button type="button" onClick={() => svgRef.current && void downloadPng(svgRef.current, `${fileNameBase}.png`, 2)}>PNG</button>

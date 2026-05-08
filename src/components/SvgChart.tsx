@@ -186,7 +186,7 @@ export function SvgChart({
   domainX,
   domainY,
   tripartite = false,
-  showToolbarTitle = true,
+  showToolbarTitle = false,
   annotations = [],
 }: SvgChartProps): JSX.Element {
   const svgRef = useRef<SVGSVGElement | null>(null);
