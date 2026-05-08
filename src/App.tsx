@@ -185,7 +185,6 @@ export default function App(): JSX.Element {
     <div className="app-shell">
       <header className="hero">
         <div>
-          <p className="eyebrow">Browser-only / GitHub Pages ready</p>
           <h1>Strong Motion Web Viewer</h1>
           <p>Analyze K-NET, KiK-net, and CSV waveform data entirely in the browser. Files are not uploaded to a server.</p>
         </div>
