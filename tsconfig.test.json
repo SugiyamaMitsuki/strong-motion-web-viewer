@@ -1,0 +1,27 @@
+{
+  "extends": "./tsconfig.app.json",
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM"],
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "isolatedModules": false,
+    "noEmit": false,
+    "noEmitOnError": true,
+    "outDir": ".test-dist",
+    "rootDir": ".",
+    "declaration": false,
+    "sourceMap": false
+  },
+  "include": [
+    "src/analysis/calculus.ts",
+    "src/analysis/fft.ts",
+    "src/analysis/jmaIntensity.ts",
+    "src/analysis/orbit.ts",
+    "src/analysis/responseSpectrum.ts",
+    "src/analysis/statistics.ts",
+    "src/parsers/jma.ts",
+    "src/utils/file.ts",
+    "src/types/waveform.ts"
+  ]
+}

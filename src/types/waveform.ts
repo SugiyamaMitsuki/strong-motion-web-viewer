@@ -16,6 +16,7 @@ export interface WaveformMetadata {
   depthKm?: number;
   magnitude?: number;
   durationSec?: number;
+  jmaIntensityWindowSec?: number;
   direction?: string;
   scaleFactorText?: string;
   maxAccelerationGalHeader?: number;

@@ -18,6 +18,7 @@ export interface ParticleOrbitResult {
 interface OrbitGroup {
   key: string;
   label: string;
+  duplicateComponents: Set<'NS' | 'EW' | 'UD'>;
   ns?: DerivedWaveform;
   ew?: DerivedWaveform;
   ud?: DerivedWaveform;
@@ -75,6 +76,20 @@ function componentSuffix(waveform: DerivedWaveform): string {
   return match?.[1] ?? '';
 }
 
+function normalizedSourceName(fileName: string): string {
+  return fileName.split('#')[0]
+    .replace(/\.(NS|EW|UD)\d*$/i, '')
+    .replace(/([._-])(NS|EW|UD)(?=\.[^.]+$)/i, '');
+}
+
+function eventIdentity(waveform: DerivedWaveform): { key: string; label?: string } {
+  const originTime = waveform.metadata.originTime?.trim();
+  if (originTime) return { key: `origin:${originTime}`, label: originTime };
+  const recordTime = waveform.metadata.recordTime?.trim();
+  if (recordTime) return { key: `record:${recordTime}`, label: recordTime };
+  return { key: `source:${normalizedSourceName(waveform.fileName)}` };
+}
+
 function buildGroups(waveforms: readonly DerivedWaveform[]): OrbitGroup[] {
   const groups = new Map<string, OrbitGroup>();
 
@@ -82,14 +97,25 @@ function buildGroups(waveforms: readonly DerivedWaveform[]): OrbitGroup[] {
     if (waveform.component !== 'NS' && waveform.component !== 'EW' && waveform.component !== 'UD') continue;
 
     const station = stationIdentity(waveform);
+    const event = eventIdentity(waveform);
     const suffix = componentSuffix(waveform);
-    const key = `${station.key}|${suffix}`;
-    const label = suffix ? `${station.label} channel ${suffix}` : station.label;
-    const group = groups.get(key) ?? { key, label };
+    const key = `${station.key}|${event.key}|${suffix}`;
+    const stationChannelLabel = suffix ? `${station.label} channel ${suffix}` : station.label;
+    const label = event.label ? `${stationChannelLabel} (${event.label})` : stationChannelLabel;
+    const group = groups.get(key) ?? { key, label, duplicateComponents: new Set<'NS' | 'EW' | 'UD'>() };
 
-    if (waveform.component === 'NS' && !group.ns) group.ns = waveform;
-    if (waveform.component === 'EW' && !group.ew) group.ew = waveform;
-    if (waveform.component === 'UD' && !group.ud) group.ud = waveform;
+    if (waveform.component === 'NS') {
+      if (group.ns) group.duplicateComponents.add('NS');
+      else group.ns = waveform;
+    }
+    if (waveform.component === 'EW') {
+      if (group.ew) group.duplicateComponents.add('EW');
+      else group.ew = waveform;
+    }
+    if (waveform.component === 'UD') {
+      if (group.ud) group.duplicateComponents.add('UD');
+      else group.ud = waveform;
+    }
 
     groups.set(key, group);
   }
@@ -103,6 +129,53 @@ function waveformForComponent(group: OrbitGroup, component: 'EW' | 'NS' | 'UD'):
   return group.ud;
 }
 
+function parseRecordTimeMs(value: string): number | undefined {
+  const match = value.trim().match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})[ T](\d{1,2}):(\d{1,2}):(\d{1,2}(?:\.\d+)?)$/);
+  if (!match) return undefined;
+  const [, year, month, day, hour, minute, secondText] = match;
+  const second = Number(secondText);
+  if (!Number.isFinite(second)) return undefined;
+  const wholeSecond = Math.floor(second);
+  const milliseconds = Math.round((second - wholeSecond) * 1000);
+  return Date.UTC(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute), wholeSecond, milliseconds);
+}
+
+function recordStartOffsets(left: DerivedWaveform, right: DerivedWaveform): [number, number] | undefined {
+  const leftTime = left.metadata.recordTime?.trim();
+  const rightTime = right.metadata.recordTime?.trim();
+  if (!leftTime && !rightTime) return [0, 0];
+  if (!leftTime || !rightTime) return undefined;
+
+  const leftMs = parseRecordTimeMs(leftTime);
+  const rightMs = parseRecordTimeMs(rightTime);
+  if (leftMs !== undefined && rightMs !== undefined) {
+    const earliestMs = Math.min(leftMs, rightMs);
+    return [(leftMs - earliestMs) / 1000, (rightMs - earliestMs) / 1000];
+  }
+
+  return leftTime === rightTime ? [0, 0] : undefined;
+}
+
+function interpolateAt(times: readonly number[], values: readonly number[], targetTime: number): number | undefined {
+  const n = Math.min(times.length, values.length);
+  if (n === 0 || targetTime < times[0] || targetTime > times[n - 1]) return undefined;
+  if (targetTime === times[0]) return values[0];
+  if (targetTime === times[n - 1]) return values[n - 1];
+
+  let left = 0;
+  let right = n - 1;
+  while (right - left > 1) {
+    const middle = Math.floor((left + right) / 2);
+    if (times[middle] <= targetTime) left = middle;
+    else right = middle;
+  }
+
+  const span = times[right] - times[left];
+  if (span <= 0) return undefined;
+  const ratio = (targetTime - times[left]) / span;
+  return values[left] * (1 - ratio) + values[right] * ratio;
+}
+
 export function computeParticleOrbits(
   waveforms: readonly DerivedWaveform[],
   projection: OrbitProjection,
@@ -113,22 +186,40 @@ export function computeParticleOrbits(
   const components = projectionComponents(projection);
 
   for (const group of buildGroups(waveforms)) {
+    if (group.duplicateComponents.has(components.x) || group.duplicateComponents.has(components.y)) continue;
     const xWaveform = waveformForComponent(group, components.x);
     const yWaveform = waveformForComponent(group, components.y);
     if (!xWaveform || !yWaveform) continue;
+    if (!Number.isFinite(xWaveform.dt) || xWaveform.dt <= 0 || !Number.isFinite(yWaveform.dt) || yWaveform.dt <= 0) continue;
+    const startOffsets = recordStartOffsets(xWaveform, yWaveform);
+    if (!startOffsets) continue;
 
     const xValues = valuesForQuantity(xWaveform, quantity);
     const yValues = valuesForQuantity(yWaveform, quantity);
-    const n = Math.min(xValues.length, yValues.length, xWaveform.time.length, yWaveform.time.length);
+    const xLength = Math.min(xValues.length, xWaveform.time.length);
+    const yLength = Math.min(yValues.length, yWaveform.time.length);
+    if (xLength === 0 || yLength === 0) continue;
+    const alignedXValues = xValues.slice(0, xLength);
+    const alignedYValues = yValues.slice(0, yLength);
+    const xTimes = xWaveform.time.slice(0, xLength).map((time) => time + startOffsets[0]);
+    const yTimes = yWaveform.time.slice(0, yLength).map((time) => time + startOffsets[1]);
+
+    const targetDt = Math.min(xWaveform.dt, yWaveform.dt);
+    const commonStart = Math.max(xTimes[0], yTimes[0]);
+    const commonEnd = Math.min(xTimes[xTimes.length - 1], yTimes[yTimes.length - 1]);
+    if (!Number.isFinite(commonStart) || !Number.isFinite(commonEnd) || commonEnd < commonStart) continue;
+    const commonSampleSpan = commonEnd - commonStart;
+    const n = Math.max(0, Math.floor(commonSampleSpan / targetDt + 1e-9) + 1);
     const time: number[] = [];
     const x: number[] = [];
     const y: number[] = [];
 
     for (let i = 0; i < n; i += 1) {
-      const xv = xValues[i];
-      const yv = yValues[i];
-      if (!Number.isFinite(xv) || !Number.isFinite(yv)) continue;
-      time.push(Math.min(xWaveform.time[i], yWaveform.time[i]));
+      const sampleTime = commonStart + i * targetDt;
+      const xv = interpolateAt(xTimes, alignedXValues, sampleTime);
+      const yv = interpolateAt(yTimes, alignedYValues, sampleTime);
+      if (xv === undefined || yv === undefined || !Number.isFinite(xv) || !Number.isFinite(yv)) continue;
+      time.push(sampleTime);
       x.push(xv);
       y.push(yv);
     }

@@ -8,6 +8,7 @@ import { formatNumber, safeFileName } from '../utils/file';
 
 interface ReportFigurePanelProps {
   waveforms: DerivedWaveform[];
+  jmaWaveforms: DerivedWaveform[];
   peaks: PeakSummary[];
   responseSettings: ResponseSpectrumSettings;
 }
@@ -596,7 +597,7 @@ function renderResponsePanel(rect: Rect, series: readonly SeriesSpec[], settings
   ));
 }
 
-export function ReportFigurePanel({ waveforms, peaks, responseSettings }: ReportFigurePanelProps): JSX.Element {
+export function ReportFigurePanel({ waveforms, jmaWaveforms, peaks, responseSettings }: ReportFigurePanelProps): JSX.Element {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const stations = useMemo(() => buildReportStations(waveforms, peaks), [waveforms, peaks]);
   const [stationId, setStationId] = useState<string>('');
@@ -606,7 +607,11 @@ export function ReportFigurePanel({ waveforms, peaks, responseSettings }: Report
     [selectedStation],
   );
   const selectedPeaks = selectedStation?.peaks ?? [];
-  const selectedIntensity = useMemo(() => computeJmaIntensity(selectedWaveforms), [selectedWaveforms]);
+  const selectedJmaWaveforms = useMemo(() => {
+    const selectedIds = new Set(selectedWaveforms.map((waveform) => waveform.sourceRecordId));
+    return jmaWaveforms.filter((waveform) => selectedIds.has(waveform.sourceRecordId));
+  }, [jmaWaveforms, selectedWaveforms]);
+  const selectedIntensity = useMemo(() => computeJmaIntensity(selectedJmaWaveforms), [selectedJmaWaveforms]);
   const response = useMemo(() => responseSeries(selectedWaveforms, responseSettings), [selectedWaveforms, responseSettings]);
 
   if (waveforms.length === 0 || !selectedStation) {

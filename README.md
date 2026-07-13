@@ -39,6 +39,8 @@ https://sugiyamamitsuki.github.io/strong-motion-web-viewer/
 - Particle orbit plots
   - EW-NS, EW-UD, and NS-UD projections
   - Acceleration, velocity, and displacement modes
+  - Components are separated by event and aligned on their shared physical time span
+  - Different sampling intervals are resampled onto a shared time grid
   - Square plots with equal X/Y scale
 - Fourier amplitude spectra
 - Morlet wavelet scalograms
@@ -58,12 +60,18 @@ https://sugiyamamitsuki.github.io/strong-motion-web-viewer/
 - Response spectra
   - Nigam-Jennings method
   - Default damping ratio: 5%
+  - Tracks oscillator peaks between input samples and after the record ends
+  - Rejects periods that would exceed the bounded substep calculation and caps UI periods at 100 s
   - Sd / pSv / Sa views
   - Switchable log-log 1:1 view and fitted data-range view
   - Tripartite spectrum background for pSv in log-log 1:1 mode
 - JMA seismic intensity
   - Calculated when NS/EW/UD three-component data are available
   - JMA seismic intensity filter is applied in the FFT domain
+  - Components must form one unambiguous station/channel set with matching start times
+  - JMA downloads containing multiple 60-second intervals are evaluated interval by interval
+  - Materially truncated intervals, missing samples, and unknown acceleration units are rejected
+  - Display preprocessing does not alter the intensity used by the summary, report, or exports
 - Peak amplitudes
   - PGA
   - PGV
