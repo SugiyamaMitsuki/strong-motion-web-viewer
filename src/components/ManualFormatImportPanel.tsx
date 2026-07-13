@@ -200,6 +200,7 @@ export function ManualFormatImportPanel({
               key={file.id}
               type="button"
               className={file.id === selectedFile.id ? 'active' : ''}
+              aria-pressed={file.id === selectedFile.id}
               onClick={() => setSelectedId(file.id)}
             >
               <span>{file.fileName}</span>
@@ -277,10 +278,11 @@ export function ManualFormatImportPanel({
 
           <div className="table-wrapper preview-table-wrapper">
             <table className="preview-table">
+              <caption className="sr-only">Preview of the detected columns in {selectedFile.fileName}</caption>
               <thead>
                 <tr>
                   {Array.from({ length: Math.max(1, layout.columnCount) }, (_, index) => (
-                    <th key={`col-${index + 1}`}>Col {index + 1}</th>
+                    <th key={`col-${index + 1}`} scope="col">Col {index + 1}</th>
                   ))}
                 </tr>
               </thead>

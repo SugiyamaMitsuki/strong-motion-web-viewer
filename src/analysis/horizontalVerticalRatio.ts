@@ -7,6 +7,7 @@ interface HvsrGroup {
   ns?: DerivedWaveform;
   ew?: DerivedWaveform;
   ud?: DerivedWaveform;
+  duplicateComponents: Set<'NS' | 'EW' | 'UD'>;
 }
 
 export interface HorizontalVerticalRatioOptions {
@@ -91,6 +92,20 @@ function componentSuffix(waveform: DerivedWaveform): string {
   return match?.[1] ?? '';
 }
 
+function normalizedSourceName(fileName: string): string {
+  return fileName.split('#')[0]
+    .replace(/\.(NS|EW|UD)\d*$/i, '')
+    .replace(/([._-])(NS|EW|UD)(?=\.[^.]+$)/i, '');
+}
+
+function eventIdentity(waveform: DerivedWaveform): { key: string; label?: string } {
+  const originTime = waveform.metadata.originTime?.trim();
+  if (originTime) return { key: `origin:${originTime}`, label: originTime };
+  const recordTime = waveform.metadata.recordTime?.trim();
+  if (recordTime) return { key: `record:${recordTime}`, label: recordTime };
+  return { key: `source:${normalizedSourceName(waveform.fileName)}` };
+}
+
 function buildGroups(waveforms: readonly DerivedWaveform[]): HvsrGroup[] {
   const groups = new Map<string, HvsrGroup>();
 
@@ -98,14 +113,25 @@ function buildGroups(waveforms: readonly DerivedWaveform[]): HvsrGroup[] {
     if (waveform.component !== 'NS' && waveform.component !== 'EW' && waveform.component !== 'UD') continue;
 
     const station = stationIdentity(waveform);
+    const event = eventIdentity(waveform);
     const suffix = componentSuffix(waveform);
-    const key = `${station.key}|${suffix}`;
-    const label = suffix ? `${station.label} channel ${suffix}` : station.label;
-    const group = groups.get(key) ?? { key, label };
+    const key = `${station.key}|${event.key}|${suffix}`;
+    const stationChannelLabel = suffix ? `${station.label} channel ${suffix}` : station.label;
+    const label = event.label ? `${stationChannelLabel} (${event.label})` : stationChannelLabel;
+    const group = groups.get(key) ?? { key, label, duplicateComponents: new Set<'NS' | 'EW' | 'UD'>() };
 
-    if (waveform.component === 'NS' && !group.ns) group.ns = waveform;
-    if (waveform.component === 'EW' && !group.ew) group.ew = waveform;
-    if (waveform.component === 'UD' && !group.ud) group.ud = waveform;
+    if (waveform.component === 'NS') {
+      if (group.ns) group.duplicateComponents.add('NS');
+      else group.ns = waveform;
+    }
+    if (waveform.component === 'EW') {
+      if (group.ew) group.duplicateComponents.add('EW');
+      else group.ew = waveform;
+    }
+    if (waveform.component === 'UD') {
+      if (group.ud) group.duplicateComponents.add('UD');
+      else group.ud = waveform;
+    }
 
     groups.set(key, group);
   }
@@ -253,6 +279,7 @@ export function computeHorizontalVerticalRatios(
   const groups = buildGroups(waveforms);
 
   for (const group of groups) {
+    if (group.duplicateComponents.size > 0) continue;
     const horizontalWaveforms = [group.ns, group.ew].filter((waveform): waveform is DerivedWaveform => waveform !== undefined);
     if (!group.ud || horizontalWaveforms.length === 0) continue;
 

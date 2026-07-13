@@ -13,7 +13,11 @@ export interface WaveletResult {
   time: number[];
   frequency: number[];
   amplitude: number[][];
+  /** Unit of the input signal before the continuous wavelet transform. */
+  inputUnit: string;
+  /** Unit of an L2-normalized CWT coefficient: input unit multiplied by sqrt(s). */
   unit: string;
+  normalization: 'L2';
   effectiveDt: number;
   inputSamples: number;
   computedSamples: number;
@@ -26,6 +30,13 @@ export const defaultWaveletOptions: WaveletOptions = {
   morletOmega0: 8,
   maxSamples: 6144,
 };
+
+export const MORLET_CWT_NORMALIZATION = 'L2-normalized: psi_scale(t) = psi(t / scale) / sqrt(scale)';
+
+export function cwtCoefficientUnit(inputUnit: string): string {
+  const normalized = inputUnit.trim();
+  return normalized ? `${normalized}·√s` : '√s';
+}
 
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value);
@@ -69,13 +80,16 @@ export function computeMorletWavelet(
     ...defaultWaveletOptions,
     ...options,
   };
+  const coefficientUnit = cwtCoefficientUnit(unit);
 
   if (values.length === 0 || dt <= 0) {
     return {
       time: [],
       frequency: [],
       amplitude: [],
-      unit,
+      inputUnit: unit,
+      unit: coefficientUnit,
+      normalization: 'L2',
       effectiveDt: dt,
       inputSamples: values.length,
       computedSamples: 0,
@@ -101,7 +115,9 @@ export function computeMorletWavelet(
       time: [],
       frequency: [],
       amplitude: [],
-      unit,
+      inputUnit: unit,
+      unit: coefficientUnit,
+      normalization: 'L2',
       effectiveDt: working.dt,
       inputSamples: values.length,
       computedSamples: n,
@@ -157,7 +173,9 @@ export function computeMorletWavelet(
     time,
     frequency,
     amplitude,
-    unit,
+    inputUnit: unit,
+    unit: coefficientUnit,
+    normalization: 'L2',
     effectiveDt: working.dt,
     inputSamples: values.length,
     computedSamples: n,

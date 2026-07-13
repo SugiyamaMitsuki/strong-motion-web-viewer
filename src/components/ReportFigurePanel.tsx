@@ -5,6 +5,8 @@ import { computeResponseSpectra } from '../analysis/responseSpectrum';
 import { downloadPng, downloadSvg } from '../export/exportImage';
 import type { DerivedWaveform, PeakSummary, Quantity, ResponseSpectrumSettings } from '../types/waveform';
 import { formatNumber, safeFileName } from '../utils/file';
+import { componentSeriesStyle } from '../visualization/chartStyle';
+import { downsampleSegments } from '../visualization/downsample';
 
 interface ReportFigurePanelProps {
   waveforms: DerivedWaveform[];
@@ -33,17 +35,12 @@ interface SeriesSpec {
   x: number[];
   y: number[];
   color: string;
+  dashArray?: string;
 }
 
 const WIDTH = 1120;
 const HEIGHT = 1584;
 const FONT_FAMILY = 'Arial, Helvetica, sans-serif';
-const COLORS: Record<string, string> = {
-  NS: '#D55E00',
-  EW: '#0072B2',
-  UD: '#009E73',
-  OTHER: '#CC79A7',
-};
 const LOG_SNAP_STEP = 0.25;
 
 interface LogRange {
@@ -51,8 +48,53 @@ interface LogRange {
   maxLog: number;
 }
 
+interface ReportTimeAxis {
+  label: string;
+  reference: string;
+  offsetsByRecordId: Map<string, number>;
+}
+
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value);
+}
+
+function parseRecordTimeMs(value: string): number | undefined {
+  const match = value.trim().match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})[ T](\d{1,2}):(\d{1,2}):(\d{1,2}(?:\.\d+)?)$/);
+  if (!match) return undefined;
+  const [, year, month, day, hour, minute, secondText] = match;
+  const second = Number(secondText);
+  if (!Number.isFinite(second)) return undefined;
+  const wholeSecond = Math.floor(second);
+  const milliseconds = Math.round((second - wholeSecond) * 1000);
+  return Date.UTC(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute), wholeSecond, milliseconds);
+}
+
+function reportTimeAxis(waveforms: readonly DerivedWaveform[]): ReportTimeAxis {
+  const offsetsByRecordId = new Map<string, number>();
+  const recordTimes = waveforms.map((waveform) => waveform.metadata.recordTime?.trim());
+  const parsedTimes = recordTimes.map((value) => value ? parseRecordTimeMs(value) : undefined);
+
+  if (parsedTimes.length > 0 && parsedTimes.every((value): value is number => value !== undefined)) {
+    const earliest = Math.min(...parsedTimes);
+    waveforms.forEach((waveform, index) => {
+      offsetsByRecordId.set(waveform.sourceRecordId, (parsedTimes[index] - earliest) / 1000);
+    });
+    const hasOffset = parsedTimes.some((value) => value !== earliest);
+    return {
+      label: hasOffset ? 'Elapsed time from earliest record start [s]' : 'Time from record start [s]',
+      reference: hasOffset ? `earliest record start (${recordTimes[parsedTimes.indexOf(earliest)]})` : `record start (${recordTimes[0]})`,
+      offsetsByRecordId,
+    };
+  }
+
+  waveforms.forEach((waveform) => offsetsByRecordId.set(waveform.sourceRecordId, 0));
+  const nonEmptyTimes = recordTimes.filter((value): value is string => Boolean(value));
+  const commonStart = nonEmptyTimes.length === waveforms.length && new Set(nonEmptyTimes).size === 1;
+  return {
+    label: commonStart ? 'Time from record start [s]' : 'Time from each component start [s]',
+    reference: commonStart ? `record start (${nonEmptyTimes[0]})` : 'each component record start (absolute alignment unavailable)',
+    offsetsByRecordId,
+  };
 }
 
 function componentRank(component: string): number {
@@ -69,7 +111,7 @@ function quantityValues(waveform: DerivedWaveform, quantity: Quantity): number[]
 }
 
 function quantityUnit(quantity: Quantity): string {
-  if (quantity === 'acceleration') return 'cm/s2';
+  if (quantity === 'acceleration') return 'cm/s²';
   if (quantity === 'velocity') return 'cm/s';
   return 'cm';
 }
@@ -104,6 +146,13 @@ function stationLabelFromWaveform(waveform: DerivedWaveform): string {
   return 'Loaded waveform set';
 }
 
+function componentSuffix(waveform: DerivedWaveform): string {
+  const component = waveform.component;
+  if (component !== 'NS' && component !== 'EW' && component !== 'UD') return '';
+  const match = waveform.componentLabel.toUpperCase().match(new RegExp(`^${component}(.*)$`));
+  return match?.[1] ?? '';
+}
+
 function buildReportStations(waveforms: readonly DerivedWaveform[], peaks: readonly PeakSummary[]): ReportStation[] {
   const rows = computeStationDistanceRows(waveforms.map((waveform) => ({
     id: waveform.sourceRecordId,
@@ -112,7 +161,7 @@ function buildReportStations(waveforms: readonly DerivedWaveform[], peaks: reado
     component: waveform.component,
     componentLabel: waveform.componentLabel,
     quantity: 'acceleration',
-    unit: 'cm/s2',
+    unit: 'cm/s²',
     values: [],
     dt: waveform.dt,
     samplingHz: waveform.samplingHz,
@@ -128,15 +177,24 @@ function buildReportStations(waveforms: readonly DerivedWaveform[], peaks: reado
     }];
   }
 
-  return rows.map((row) => {
+  return rows.flatMap((row) => {
     const ids = new Set(row.recordIds);
-    return {
-      id: row.id,
-      label: row.label,
-      row,
-      waveforms: waveforms.filter((waveform) => ids.has(waveform.sourceRecordId)),
-      peaks: peaks.filter((peak) => ids.has(peak.sourceRecordId)),
-    };
+    const rowWaveforms = waveforms.filter((waveform) => ids.has(waveform.sourceRecordId));
+    const channels = new Map<string, DerivedWaveform[]>();
+    rowWaveforms.forEach((waveform) => {
+      const suffix = componentSuffix(waveform);
+      channels.set(suffix, [...(channels.get(suffix) ?? []), waveform]);
+    });
+    return Array.from(channels.entries()).map(([suffix, channelWaveforms]) => {
+      const channelIds = new Set(channelWaveforms.map((waveform) => waveform.sourceRecordId));
+      return {
+        id: `${row.id}|channel:${suffix || 'default'}`,
+        label: suffix ? `${row.label} channel ${suffix}` : row.label,
+        row,
+        waveforms: channelWaveforms,
+        peaks: peaks.filter((peak) => channelIds.has(peak.sourceRecordId)),
+      };
+    });
   });
 }
 
@@ -150,27 +208,23 @@ function scaleLog(value: number, domainMin: number, domainMax: number, rangeMin:
   return rangeMin + ((Math.log10(value) - Math.log10(domainMin)) / (Math.log10(domainMax) - Math.log10(domainMin))) * (rangeMax - rangeMin);
 }
 
-function downsampleIndices(length: number, maxPoints: number): number[] {
-  if (length <= maxPoints) return Array.from({ length }, (_, index) => index);
-  const step = Math.ceil(length / maxPoints);
-  const indices: number[] = [];
-  for (let i = 0; i < length; i += step) indices.push(i);
-  if (indices[indices.length - 1] !== length - 1) indices.push(length - 1);
-  return indices;
-}
-
-function timePath(time: readonly number[], values: readonly number[], rect: Rect, maxAbs: number): string {
-  const n = Math.min(time.length, values.length);
-  if (n === 0 || maxAbs <= 0) return '';
-  const indices = downsampleIndices(n, 900);
-  const xMin = time[0] ?? 0;
-  const xMax = time[n - 1] ?? Math.max(1, n - 1);
-
-  return indices.map((index, pathIndex) => {
-    const x = scaleLinear(time[index], xMin, xMax, rect.x, rect.x + rect.width);
-    const y = scaleLinear(values[index], -maxAbs, maxAbs, rect.y + rect.height, rect.y);
-    return `${pathIndex === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`;
-  }).join(' ');
+function timePath(
+  time: readonly number[],
+  values: readonly number[],
+  rect: Rect,
+  maxAbs: number,
+  timeDomain: [number, number],
+): string {
+  if (maxAbs <= 0) return '';
+  const parts: string[] = [];
+  downsampleSegments(time, values, 900).forEach((segment) => {
+    segment.x.forEach((timeValue, index) => {
+      const x = scaleLinear(timeValue, timeDomain[0], timeDomain[1], rect.x, rect.x + rect.width);
+      const y = scaleLinear(segment.y[index], -maxAbs, maxAbs, rect.y + rect.height, rect.y);
+      parts.push(`${index === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`);
+    });
+  });
+  return parts.join(' ');
 }
 
 function linearTicks(min: number, max: number, count: number): number[] {
@@ -235,12 +289,16 @@ function niceLogCeil(value: number, fallback: number): number {
 function responseSeries(waveforms: readonly DerivedWaveform[], settings: ResponseSpectrumSettings): SeriesSpec[] {
   return computeResponseSpectra([...waveforms], settings)
     .sort((a, b) => componentRank(a.component) - componentRank(b.component))
-    .map((result) => ({
-      name: result.componentLabel,
-      x: result.points.map((point) => point.period),
-      y: result.points.map((point) => point.psv),
-      color: COLORS[result.component] ?? COLORS.OTHER,
-    }));
+    .map((result) => {
+      const style = componentSeriesStyle(result.component);
+      return {
+        name: result.componentLabel,
+        x: result.points.map((point) => point.period),
+        y: result.points.map((point) => point.psv),
+        color: style.color,
+        dashArray: style.dashArray,
+      };
+    });
 }
 
 function log10(value: number): number {
@@ -307,18 +365,15 @@ function tripartiteDomains(series: readonly SeriesSpec[], settings: ResponseSpec
 }
 
 function linePath(series: SeriesSpec, rect: Rect, xDomain: [number, number], yDomain: [number, number]): string {
-  const n = Math.min(series.x.length, series.y.length);
-  if (n === 0) return '';
-  const indices = downsampleIndices(n, 700);
   const parts: string[] = [];
-  for (const index of indices) {
-    const xValue = series.x[index];
-    const yValue = series.y[index];
-    if (!Number.isFinite(xValue) || !Number.isFinite(yValue) || xValue <= 0 || yValue <= 0) continue;
-    const x = scaleLog(xValue, xDomain[0], xDomain[1], rect.x, rect.x + rect.width);
-    const y = scaleLog(yValue, yDomain[0], yDomain[1], rect.y + rect.height, rect.y);
-    parts.push(`${parts.length === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`);
-  }
+  downsampleSegments(series.x, series.y, 700, (x, y) => Number.isFinite(x) && Number.isFinite(y) && x > 0 && y > 0)
+    .forEach((segment) => {
+      segment.x.forEach((xValue, index) => {
+        const x = scaleLog(xValue, xDomain[0], xDomain[1], rect.x, rect.x + rect.width);
+        const y = scaleLog(segment.y[index], yDomain[0], yDomain[1], rect.y + rect.height, rect.y);
+        parts.push(`${index === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`);
+      });
+    });
   return parts.join(' ');
 }
 
@@ -351,20 +406,40 @@ function textRows(x: number, y: number, rows: Array<[string, string]>, rowHeight
 
 function renderWaveformPanel(rect: Rect, title: string, waveforms: readonly DerivedWaveform[], quantity: Quantity): JSX.Element {
   const ordered = [...waveforms].sort((a, b) => componentRank(a.component) - componentRank(b.component));
+  const timeAxis = reportTimeAxis(ordered);
   const plotTop = rect.y + 44;
   const rowHeight = (rect.height - 102) / Math.max(1, ordered.length);
   const plotWidth = rect.width - 120;
-  const axisWaveform = ordered[0];
-  const axisValues = axisWaveform ? quantityValues(axisWaveform, quantity) : [];
-  const nForAxis = axisWaveform ? Math.min(axisWaveform.time.length, axisValues.length) : 0;
-  const timeMin = axisWaveform?.time[0] ?? 0;
-  const timeMax = nForAxis > 0 ? axisWaveform?.time[nForAxis - 1] ?? 0 : 0;
+  let timeMin = Infinity;
+  let timeMax = -Infinity;
+  let sharedMaxAbs = 0;
+  ordered.forEach((waveform) => {
+    const values = quantityValues(waveform, quantity);
+    const count = Math.min(waveform.time.length, values.length);
+    const offset = timeAxis.offsetsByRecordId.get(waveform.sourceRecordId) ?? 0;
+    for (let index = 0; index < count; index += 1) {
+      const time = waveform.time[index] + offset;
+      if (!Number.isFinite(time) || !Number.isFinite(values[index])) continue;
+      timeMin = Math.min(timeMin, time);
+      timeMax = Math.max(timeMax, time);
+      sharedMaxAbs = Math.max(sharedMaxAbs, Math.abs(values[index]));
+    }
+  });
+  if (!Number.isFinite(timeMin) || !Number.isFinite(timeMax)) [timeMin, timeMax] = [0, 1];
+  if (timeMin === timeMax) timeMax = timeMin + 1;
+  sharedMaxAbs = Math.max(sharedMaxAbs, 1e-12);
+  const timeDomain: [number, number] = [timeMin, timeMax];
   const axisTicks = linearTicks(timeMin, timeMax, 5);
   const axisX = rect.x + 76;
-  const axisY = rect.y + rect.height - 24;
+  const axisY = rect.y + rect.height - 34;
 
   return card(rect, title, (
     <g>
+      {ordered.length > 0 && (
+        <text x={rect.x + rect.width - 2} y={rect.y + 18} textAnchor="end" fontSize="11.5" fontWeight="600" fill="#4b5563">
+          Shared ordinate ±{formatNumber(sharedMaxAbs, 4)} {quantityUnit(quantity)}
+        </text>
+      )}
       {ordered.length === 0 ? (
         <text x={rect.x + rect.width / 2} y={rect.y + rect.height / 2} textAnchor="middle" fontSize="13" fontWeight="600" fill="#6b7280">No waveform data</text>
       ) : ordered.map((waveform, index) => {
@@ -375,15 +450,24 @@ function renderWaveformPanel(rect: Rect, title: string, waveforms: readonly Deri
           height: Math.max(28, rowHeight - 18),
         };
         const values = quantityValues(waveform, quantity);
-        const peak = maxAbsWithTime(values, waveform.time);
-        const maxAbs = Math.max(peak.value, 1e-12);
-        const color = COLORS[waveform.component] ?? COLORS.OTHER;
+        const offset = timeAxis.offsetsByRecordId.get(waveform.sourceRecordId) ?? 0;
+        const alignedTime = offset === 0 ? waveform.time : waveform.time.map((value) => value + offset);
+        const peak = maxAbsWithTime(values, alignedTime);
+        const style = componentSeriesStyle(waveform.component);
         return (
           <g key={`${quantity}-${waveform.sourceRecordId}`}>
-            <text x={rect.x + 2} y={rowRect.y + rowRect.height / 2 + 5} fontSize="12.5" fontWeight="700" fill={color}>{waveform.componentLabel}</text>
+            <text x={rect.x + 2} y={rowRect.y + rowRect.height / 2 + 5} fontSize="12.5" fontWeight="700" fill="#263640">{waveform.componentLabel}</text>
             <line x1={rowRect.x} y1={rowRect.y + rowRect.height / 2} x2={rowRect.x + rowRect.width} y2={rowRect.y + rowRect.height / 2} stroke="#9ca3af" strokeWidth="0.55" />
-            <path d={timePath(waveform.time, values, rowRect, maxAbs)} fill="none" stroke={color} strokeWidth="1.05" />
-            <text x={rowRect.x + rowRect.width - 7} y={rowRect.y + 14} textAnchor="end" fontSize="10.5" fontWeight="600" fill="#374151">
+            <path
+              d={timePath(alignedTime, values, rowRect, sharedMaxAbs, timeDomain)}
+              fill="none"
+              stroke={style.color}
+              strokeWidth="1.2"
+              strokeDasharray={style.dashArray}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+            <text x={rowRect.x + rowRect.width - 7} y={rowRect.y + 14} textAnchor="end" fontSize="11.5" fontWeight="600" fill="#374151">
               Max {formatNumber(peak.value, 4)} {quantityUnit(quantity)} at {formatNumber(peak.time, 3)} s
             </text>
           </g>
@@ -397,13 +481,13 @@ function renderWaveformPanel(rect: Rect, title: string, waveforms: readonly Deri
             return (
               <g key={`${title}-tick-${tick}`}>
                 <line x1={x} y1={axisY} x2={x} y2={axisY + 4} stroke="#374151" strokeWidth="0.65" />
-                <text x={x} y={axisY + 16} textAnchor="middle" fontSize="10.5" fontWeight="600" fill="#374151">{formatTick(tick)}</text>
+                <text x={x} y={axisY + 15} textAnchor="middle" fontSize="11.5" fontWeight="600" fill="#374151">{formatTick(tick)}</text>
               </g>
             );
           })}
         </g>
       )}
-      <text x={rect.x + rect.width / 2} y={rect.y + rect.height - 2} textAnchor="middle" fontSize="11" fontWeight="700" fill="#374151">Time [s]</text>
+      <text x={rect.x + rect.width / 2} y={rect.y + rect.height - 2} textAnchor="middle" fontSize="11.5" fontWeight="700" fill="#374151">{timeAxis.label}</text>
     </g>
   ));
 }
@@ -448,7 +532,7 @@ function renderResponsePanel(rect: Rect, series: readonly SeriesSpec[], settings
     && yValue <= yDomain[1]
   );
 
-  return card(rect, 'Tripartite Response Spectrum: pSv', (
+  return card(rect, '(c) Tripartite response spectrum: pSv', (
     <g>
       <defs>
         <clipPath id={clipId}>
@@ -461,7 +545,7 @@ function renderResponsePanel(rect: Rect, series: readonly SeriesSpec[], settings
         const x = scaleLog(tick, xDomain[0], xDomain[1], plot.x, plot.x + plot.width);
         return (
           <g key={`x-${tick}`}>
-            <text x={x} y={plot.y + plot.height + 17} textAnchor="middle" fontSize="10.5" fontWeight="600" fill="#374151">{formatTick(tick)}</text>
+            <text x={x} y={plot.y + plot.height + 17} textAnchor="middle" fontSize="11.5" fontWeight="600" fill="#374151">{formatTick(tick)}</text>
           </g>
         );
       })}
@@ -469,7 +553,7 @@ function renderResponsePanel(rect: Rect, series: readonly SeriesSpec[], settings
         const y = scaleLog(tick, yDomain[0], yDomain[1], plot.y + plot.height, plot.y);
         return (
           <g key={`y-${tick}`}>
-            <text x={plot.x - 9} y={y + 4} textAnchor="end" fontSize="10.5" fontWeight="600" fill="#374151">{formatTick(tick)}</text>
+            <text x={plot.x - 9} y={y + 4} textAnchor="end" fontSize="11.5" fontWeight="600" fill="#374151">{formatTick(tick)}</text>
           </g>
         );
       })}
@@ -522,7 +606,7 @@ function renderResponsePanel(rect: Rect, series: readonly SeriesSpec[], settings
           />
         ))}
         {series.map((entry) => (
-          <path key={entry.name} d={linePath(entry, plot, xDomain, yDomain)} fill="none" stroke={entry.color} strokeWidth="1.8" />
+          <path key={entry.name} d={linePath(entry, plot, xDomain, yDomain)} fill="none" stroke={entry.color} strokeWidth="1.8" strokeDasharray={entry.dashArray} strokeLinecap="round" strokeLinejoin="round" />
         ))}
       </g>
 
@@ -543,13 +627,13 @@ function renderResponsePanel(rect: Rect, series: readonly SeriesSpec[], settings
             x={x}
             y={y}
             textAnchor="middle"
-            fontSize="9.5"
+            fontSize="11.5"
             fontWeight="600"
             fill="#667085"
             transform={`rotate(-38 ${x} ${y})`}
           >
             {exponent === accelerationLabelExponents[accelerationLabelExponents.length - 1]
-              ? `${powerLabel(exponent)} cm/s^2`
+              ? `${powerLabel(exponent)} cm/s²`
               : powerLabel(exponent)}
           </text>
         );
@@ -571,7 +655,7 @@ function renderResponsePanel(rect: Rect, series: readonly SeriesSpec[], settings
             x={x}
             y={y}
             textAnchor="middle"
-            fontSize="9.5"
+            fontSize="11.5"
             fontWeight="600"
             fill="#667085"
             transform={`rotate(38 ${x} ${y})`}
@@ -585,10 +669,10 @@ function renderResponsePanel(rect: Rect, series: readonly SeriesSpec[], settings
 
       <text x={plot.x + plot.width / 2} y={rect.y + rect.height - 17} textAnchor="middle" fontSize="12" fontWeight="700" fill="#111827">Period [s]</text>
       <text x={rect.x + 28} y={plot.y + plot.height / 2} textAnchor="middle" fontSize="12" fontWeight="700" fill="#111827" transform={`rotate(-90 ${rect.x + 28} ${plot.y + plot.height / 2})`}>pSv [cm/s]</text>
-      <g transform={`translate(${plot.x + 16} ${plot.y + 20})`}>
+      <g transform={`translate(${plot.x + 16} ${rect.y + 36})`}>
         {series.map((entry, index) => (
           <g key={`legend-${entry.name}`} transform={`translate(${index * 120} 0)`}>
-            <line x1="0" y1="0" x2="24" y2="0" stroke={entry.color} strokeWidth="1.8" />
+            <line x1="0" y1="0" x2="24" y2="0" stroke={entry.color} strokeWidth="1.8" strokeDasharray={entry.dashArray} strokeLinecap="round" />
             <text x="30" y="4" fontSize="11.5" fontWeight="700" fill="#111827">{entry.name}</text>
           </g>
         ))}
@@ -613,6 +697,7 @@ export function ReportFigurePanel({ waveforms, jmaWaveforms, peaks, responseSett
   }, [jmaWaveforms, selectedWaveforms]);
   const selectedIntensity = useMemo(() => computeJmaIntensity(selectedJmaWaveforms), [selectedJmaWaveforms]);
   const response = useMemo(() => responseSeries(selectedWaveforms, responseSettings), [selectedWaveforms, responseSettings]);
+  const timeAxis = useMemo(() => reportTimeAxis(selectedWaveforms), [selectedWaveforms]);
 
   if (waveforms.length === 0 || !selectedStation) {
     return <p className="empty-state">No data is available for the report figure.</p>;
@@ -630,7 +715,7 @@ export function ReportFigurePanel({ waveforms, jmaWaveforms, peaks, responseSett
       <div className="inline-controls">
         {stations.length > 1 && (
           <label>
-            Station
+            Record set
             <select value={selectedStation.id} onChange={(event) => setStationId(event.target.value)}>
               {stations.map((station) => <option key={station.id} value={station.id}>{station.label}</option>)}
             </select>
@@ -639,25 +724,41 @@ export function ReportFigurePanel({ waveforms, jmaWaveforms, peaks, responseSett
         <span className="note">A4 portrait overview figure with metadata, intensity, distance, stacked waveforms, and tripartite response spectrum.</span>
       </div>
 
-      <div className="chart-card">
+      <figure className="chart-card publication-figure report-figure" tabIndex={0} aria-label="A4 strong-motion report figure; horizontally scrollable on narrow screens">
         <div className="chart-toolbar">
-          <span aria-hidden="true" />
+          <div className="figure-toolbar-label">
+            <span className="figure-kicker">A4 publication report</span>
+            <span className="note">210 × 297 mm · editable vector or 300 dpi raster</span>
+          </div>
           <div className="button-row compact">
-            <button type="button" onClick={() => svgRef.current && downloadSvg(svgRef.current, `${fileNameBase}.svg`)}>SVG</button>
-            <button type="button" onClick={() => svgRef.current && void downloadPng(svgRef.current, `${fileNameBase}.png`, 2)}>PNG</button>
+            <button type="button" className="secondary" aria-label="Download strong-motion A4 report as a self-contained SVG" onClick={() => svgRef.current && downloadSvg(svgRef.current, `${fileNameBase}.svg`, { widthMm: 210, heightMm: 297 })}>SVG · vector</button>
+            <button type="button" className="secondary" aria-label="Download strong-motion A4 report as a 300 dpi PNG" onClick={() => svgRef.current && void downloadPng(svgRef.current, `${fileNameBase}.png`, { dpi: 300, widthMm: 210 })}>PNG · 300 dpi</button>
           </div>
         </div>
         <svg
           ref={svgRef}
+          className="publication-chart"
           width={WIDTH}
           height={HEIGHT}
           viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
           role="img"
-          aria-label="Strong motion report overview"
+          aria-labelledby="report-figure-title report-figure-description"
+          preserveAspectRatio="xMidYMid meet"
           style={{ fontFamily: FONT_FAMILY }}
         >
+          <title id="report-figure-title">Strong-motion record overview for {selectedStation.label}</title>
+          <desc id="report-figure-description">A4 portrait report containing record metadata, coordinates, distances, intensity and peak values, acceleration and velocity time histories on shared axes, and a five-percent-damped tripartite response spectrum.</desc>
+          <metadata>{JSON.stringify({
+            station: selectedStation.label,
+            sourceFiles: selectedWaveforms.map((waveform) => waveform.fileName),
+            dampingRatio: responseSettings.dampingRatio,
+            reportSizeMm: [210, 297],
+            jmaIntensityInput: 'original acceleration',
+            waveformInput: 'active preprocessing',
+            timeReference: timeAxis.reference,
+          })}</metadata>
           <rect width={WIDTH} height={HEIGHT} fill="#ffffff" />
-          <text x="60" y="54" fontSize="23" fontWeight="700" fill="#111827">Strong Motion Record Overview</text>
+          <text x="60" y="54" fontSize="23" fontWeight="700" fill="#111827">Strong-motion record overview</text>
           <text x={WIDTH - 60} y="53" textAnchor="end" fontSize="13.5" fontWeight="600" fill="#374151">{selectedStation.label}</text>
           <line x1="60" y1="74" x2={WIDTH - 60} y2="74" stroke="#111827" strokeWidth="0.9" />
 
@@ -687,18 +788,23 @@ export function ReportFigurePanel({ waveforms, jmaWaveforms, peaks, responseSett
               {textRows(790, 148, [
                 ['JMA Intensity', selectedIntensity.available ? formatNumber(selectedIntensity.intensity, 1) : '-'],
                 ['Shindo Class', selectedIntensity.available ? selectedIntensity.classLabel : '-'],
-                ['PGA', pga ? `${formatNumber(pga.value, 4)} cm/s2 (${pga.component})` : '-'],
+                ['PGA', pga ? `${formatNumber(pga.value, 4)} cm/s² (${pga.component})` : '-'],
                 ['PGV', pgv ? `${formatNumber(pgv.value, 4)} cm/s (${pgv.component})` : '-'],
                 ['PGD', pgd ? `${formatNumber(pgd.value, 4)} cm (${pgd.component})` : '-'],
               ], 22)}
             </g>
           ))}
 
-          {renderWaveformPanel({ x: 60, y: 310, width: 1000, height: 245 }, 'Acceleration Waveforms', selectedWaveforms, 'acceleration')}
-          {renderWaveformPanel({ x: 60, y: 592, width: 1000, height: 245 }, 'Velocity Waveforms', selectedWaveforms, 'velocity')}
+          {renderWaveformPanel({ x: 60, y: 310, width: 1000, height: 245 }, '(a) Acceleration waveforms', selectedWaveforms, 'acceleration')}
+          {renderWaveformPanel({ x: 60, y: 592, width: 1000, height: 245 }, '(b) Velocity waveforms', selectedWaveforms, 'velocity')}
           {renderResponsePanel({ x: 175, y: 875, width: 770, height: 650 }, response, responseSettings)}
+          <line x1="60" y1="1544" x2={WIDTH - 60} y2="1544" stroke="#9ca3af" strokeWidth="0.65" />
+          <text x="60" y="1564" fontSize="11.5" fontWeight="600" fill="#4b5563">
+            Displayed waveforms use active preprocessing; JMA intensity uses original acceleration. Response spectrum damping h = {(responseSettings.dampingRatio * 100).toFixed(1)}%.
+          </text>
         </svg>
-      </div>
+        <figcaption className="chart-caption">A4 portrait report. Component traces use a shared ordinate; the time reference is {timeAxis.reference}. Colour is reinforced by line pattern.</figcaption>
+      </figure>
     </div>
   );
 }

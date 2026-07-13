@@ -1,6 +1,8 @@
 import { useMemo, useState } from 'react';
 import { computeFourierSpectrum } from '../analysis/fourier';
 import type { DerivedWaveform, Quantity } from '../types/waveform';
+import { componentSeriesStyle } from '../visualization/chartStyle';
+import { waveformSeriesLabel } from '../visualization/labels';
 import { SvgChart, type ChartSeries } from './SvgChart';
 
 interface FourierPanelProps {
@@ -40,7 +42,7 @@ export function FourierPanel({ waveforms }: FourierPanelProps): JSX.Element {
         y.push(spectrum.amplitude[i]);
       }
     }
-    return { name: waveform.componentLabel, x, y };
+    return { id: waveform.sourceRecordId, name: waveformSeriesLabel(waveform), x, y, style: componentSeriesStyle(waveform.component) };
   }), [waveforms, quantity]);
 
   if (waveforms.length === 0) return <p className="empty-state">No data is available for Fourier spectra.</p>;
@@ -66,6 +68,7 @@ export function FourierPanel({ waveforms }: FourierPanelProps): JSX.Element {
         yScale="log"
         fileNameBase={`fourier_${quantity}`}
         height={430}
+        description={`One-sided Fourier amplitude spectra of ${quantityLabel(quantity).toLowerCase()} on logarithmic axes. Display range is 0.05–50 Hz.`}
       />
     </div>
   );

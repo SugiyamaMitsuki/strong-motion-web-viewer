@@ -1,6 +1,8 @@
 import { useMemo, useState } from 'react';
 import { computeResponseSpectra } from '../analysis/responseSpectrum';
 import type { DerivedWaveform, ResponseSpectrumSettings } from '../types/waveform';
+import { componentSeriesStyle } from '../visualization/chartStyle';
+import { waveformSeriesLabel } from '../visualization/labels';
 import { SvgChart, type ChartSeries } from './SvgChart';
 
 interface ResponseSpectrumPanelProps {
@@ -132,11 +134,16 @@ export function ResponseSpectrumPanel({ waveforms, settings }: ResponseSpectrumP
   const spectra = useMemo(() => computeResponseSpectra(waveforms, settings), [waveforms, settings]);
   const isTripartite = ordinate === 'psv' && scaleMode === 'equal';
 
-  const series = useMemo<ChartSeries[]>(() => spectra.map((result) => ({
-    name: result.componentLabel,
-    x: result.points.map((point) => point.period),
-    y: result.points.map((point) => point[ordinate]),
-  })), [spectra, ordinate]);
+  const series = useMemo<ChartSeries[]>(() => spectra.map((result, index) => {
+    const waveform = waveforms[index];
+    return {
+      id: waveform?.sourceRecordId ?? `${result.componentLabel}-${index}`,
+      name: waveform ? waveformSeriesLabel(waveform) : result.componentLabel,
+      x: result.points.map((point) => point.period),
+      y: result.points.map((point) => point[ordinate]),
+      style: componentSeriesStyle(result.component),
+    };
+  }), [spectra, ordinate, waveforms]);
 
   const { xDomain, yDomain } = useMemo(
     () => responseDomains(series, settings, ordinate, scaleMode),
@@ -180,8 +187,10 @@ export function ResponseSpectrumPanel({ waveforms, settings }: ResponseSpectrumP
         domainY={yDomain}
         width={scaleMode === 'equal' ? 700 : 900}
         height={scaleMode === 'equal' ? 700 : 430}
+        equalAspect={scaleMode === 'equal'}
         tripartite={isTripartite}
         fileNameBase={`response_spectrum_${ordinate}_${scaleMode}`}
+        description={`${chartTitle}. Damping ratio h = ${(settings.dampingRatio * 100).toFixed(1)}%. Periods exceeding the numerical substep safety limit are omitted.`}
       />
     </div>
   );

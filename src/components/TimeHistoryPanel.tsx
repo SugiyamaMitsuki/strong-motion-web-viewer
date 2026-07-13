@@ -1,6 +1,8 @@
 import { useMemo, useState } from 'react';
 import type { DerivedWaveform } from '../types/waveform';
 import { formatNumber } from '../utils/file';
+import { componentSeriesStyle } from '../visualization/chartStyle';
+import { waveformSeriesLabel } from '../visualization/labels';
 import { SvgChart, type ChartSeries } from './SvgChart';
 
 interface TimeHistoryPanelProps {
@@ -29,9 +31,11 @@ const COMPONENT_ORDER = ['NS', 'EW', 'UD', 'OTHER'];
 
 function buildSeries(waveforms: DerivedWaveform[], key: TimeHistoryQuantity): ChartSeries[] {
   return waveforms.map((waveform) => ({
-    name: waveform.componentLabel,
+    id: waveform.sourceRecordId,
+    name: waveformSeriesLabel(waveform),
     x: waveform.time,
     y: waveform[key],
+    style: componentSeriesStyle(waveform.component),
   }));
 }
 
@@ -56,7 +60,7 @@ function peakAnnotation(waveform: DerivedWaveform, quantity: QuantityConfig): st
     }
   }
 
-  return `${waveform.componentLabel} Max |${quantity.shortLabel}| = ${formatNumber(peakAbs, 5)} ${quantity.unit} at ${formatNumber(peakTime, 4)} s`;
+  return `${waveformSeriesLabel(waveform)} · max |${quantity.shortLabel}| = ${formatNumber(peakAbs, 5)} ${quantity.unit} at ${formatNumber(peakTime, 4)} s`;
 }
 
 function peakAnnotations(waveforms: DerivedWaveform[], quantity: QuantityConfig): string[] {
@@ -92,9 +96,10 @@ export function TimeHistoryPanel({ waveforms }: TimeHistoryPanelProps): JSX.Elem
           yLabel={quantity.yLabel}
           series={buildSeries(orderedWaveforms, quantity.key)}
           fileNameBase={`time_history_${quantity.fileName}`}
-          height={300}
+          height={Math.max(410, 330 + orderedWaveforms.length * 22)}
           showToolbarTitle={false}
           annotations={peakAnnotations(orderedWaveforms, quantity)}
+          description={`${quantity.label} time histories on a shared time axis. Peak absolute values and occurrence times are listed below the plot.`}
         />
       )) : QUANTITIES.flatMap((quantity) => orderedWaveforms.map((waveform) => (
         <SvgChart
@@ -104,9 +109,10 @@ export function TimeHistoryPanel({ waveforms }: TimeHistoryPanelProps): JSX.Elem
           yLabel={quantity.yLabel}
           series={buildSeries([waveform], quantity.key)}
           fileNameBase={`time_history_${quantity.fileName}_${waveform.componentLabel}`}
-          height={260}
+          height={330}
           showToolbarTitle={false}
           annotations={peakAnnotations([waveform], quantity)}
+          description={`${quantity.label} time history for ${waveformSeriesLabel(waveform)}, including its peak absolute value and occurrence time.`}
         />
       )))}
     </div>

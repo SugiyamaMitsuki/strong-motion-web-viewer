@@ -29,6 +29,7 @@ export function ParticleOrbitPanel({ waveforms }: ParticleOrbitPanelProps): JSX.
     [waveforms, projection, quantity],
   );
   const series = useMemo<ChartSeries[]>(() => orbits.map((orbit) => ({
+    id: orbit.id,
     name: orbit.label,
     x: orbit.x,
     y: orbit.y,
@@ -75,20 +76,24 @@ export function ParticleOrbitPanel({ waveforms }: ParticleOrbitPanelProps): JSX.
             width={680}
             height={680}
             fileNameBase={`particle_orbit_${quantity}_${projection}`}
+            showEndpoints
+            equalAspect
+            description={`${quantityLabel(quantity)} particle orbit in the ${projectionLabel(projection)} projection with equal horizontal and vertical scales. Open circles mark starts and filled circles mark ends.`}
           />
 
           <section className="panel summary-card">
             <h2>Orbit Data</h2>
             <div className="table-wrapper">
               <table>
+                <caption className="sr-only">Particle-orbit component pairs and sample coverage</caption>
                 <thead>
                   <tr>
-                    <th>Group</th>
-                    <th>X Component</th>
-                    <th>Y Component</th>
-                    <th>Samples</th>
-                    <th>Time Span [s]</th>
-                    <th>Unit</th>
+                    <th scope="col">Group</th>
+                    <th scope="col">X Component</th>
+                    <th scope="col">Y Component</th>
+                    <th scope="col" className="numeric">Samples</th>
+                    <th scope="col" className="numeric">Time Span [s]</th>
+                    <th scope="col">Unit</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -97,11 +102,11 @@ export function ParticleOrbitPanel({ waveforms }: ParticleOrbitPanelProps): JSX.
                     const lastTime = orbit.time[orbit.time.length - 1] ?? firstTime;
                     return (
                       <tr key={orbit.id}>
-                        <td>{orbit.label}</td>
+                        <th scope="row">{orbit.label}</th>
                         <td>{orbit.xComponent}</td>
                         <td>{orbit.yComponent}</td>
-                        <td>{orbit.x.length.toLocaleString()}</td>
-                        <td>{formatNumber(firstTime, 4)} - {formatNumber(lastTime, 4)}</td>
+                        <td className="numeric">{orbit.x.length.toLocaleString()}</td>
+                        <td className="numeric">{formatNumber(firstTime, 4)} - {formatNumber(lastTime, 4)}</td>
                         <td>{orbit.unit}</td>
                       </tr>
                     );

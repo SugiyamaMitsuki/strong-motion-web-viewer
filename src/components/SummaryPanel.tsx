@@ -50,23 +50,24 @@ export function SummaryPanel({ records, onRecordsChange, peaks, intensity }: Sum
         <h2>Peak Values</h2>
         <div className="table-wrapper">
           <table>
+            <caption className="sr-only">Peak ground-motion values for each loaded component</caption>
             <thead>
               <tr>
-                <th>Component</th>
-                <th>File</th>
-                <th>PGA [cm/s²]</th>
-                <th>PGV [cm/s]</th>
-                <th>PGD [cm]</th>
+                <th scope="col">Component</th>
+                <th scope="col">File</th>
+                <th scope="col" className="numeric">PGA [cm/s²]</th>
+                <th scope="col" className="numeric">PGV [cm/s]</th>
+                <th scope="col" className="numeric">PGD [cm]</th>
               </tr>
             </thead>
             <tbody>
               {peaks.map((peak) => (
                 <tr key={peak.sourceRecordId}>
-                  <td>{peak.componentLabel}</td>
+                  <th scope="row">{peak.componentLabel}</th>
                   <td className="file-cell">{peak.fileName}</td>
-                  <td>{formatNumber(peak.pga, 6)}</td>
-                  <td>{formatNumber(peak.pgv, 6)}</td>
-                  <td>{formatNumber(peak.pgd, 6)}</td>
+                  <td className="numeric">{formatNumber(peak.pga, 6)}</td>
+                  <td className="numeric">{formatNumber(peak.pgv, 6)}</td>
+                  <td className="numeric">{formatNumber(peak.pgd, 6)}</td>
                 </tr>
               ))}
             </tbody>
