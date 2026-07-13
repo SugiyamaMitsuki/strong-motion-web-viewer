@@ -52,19 +52,33 @@ function parseSamplingHz(line: string): number | undefined {
 }
 
 function parseInitialTime(line: string): string | undefined {
-  const match = line.match(/=\s*(\d{4})\s+(\d{1,2})\s+(\d{1,2})\s+(\d{1,2})\s+(\d{1,2})\s+([+-]?\d+(?:\.\d+)?)/);
+  const match = line.match(/=\s*(\d{2}|\d{4})\s+(\d{1,2})\s+(\d{1,2})\s+(\d{1,2})\s+(\d{1,2})\s+([+-]?\d+(?:\.\d+)?)/);
   if (!match) return undefined;
   const [, year, month, day, hour, minute, second] = match;
+  const numericYear = Number(year);
+  const fullYear = year.length === 2
+    ? (numericYear >= 70 ? 1900 + numericYear : 2000 + numericYear)
+    : numericYear;
   const two = (value: string): string => value.padStart(2, '0');
   const secValue = Number(second);
   const secText = Number.isFinite(secValue) && !Number.isInteger(secValue)
     ? secValue.toFixed(3).replace(/0+$/, '').replace(/\.$/, '').padStart(2, '0')
     : two(String(Math.trunc(secValue)));
-  return `${year}-${two(month)}-${two(day)} ${two(hour)}:${two(minute)}:${secText}`;
+  return `${fullYear}-${two(month)}-${two(day)} ${two(hour)}:${two(minute)}:${secText}`;
 }
 
 function splitCsvLine(line: string): string[] {
   return line.split(',').map((token) => token.trim());
+}
+
+function isGalUnit(unit: string | undefined): boolean {
+  if (!unit) return false;
+  const normalized = unit.toLowerCase().replace(/\s+/g, '').replace(/²/g, '2').replace(/\^/g, '');
+  return normalized === 'gal'
+    || normalized === 'gal(cm/s/s)'
+    || normalized === 'gal(cm/sec/sec)'
+    || normalized === 'cm/s2'
+    || normalized === 'cm/sec2';
 }
 
 function componentFromLabel(label: string, index: number): ComponentCode {
@@ -88,7 +102,7 @@ function baseMetadata(header: JmaHeader): WaveformMetadata {
     depthKm: header.depthKm,
     magnitude: header.magnitude,
     recordTime: header.initialTime,
-    originTime: header.initialTime,
+    jmaIntensityWindowSec: 60,
     jmaSiteCode: header.siteCode,
     jmaStationName: header.stationName,
     originalUnit: header.unit,
@@ -120,7 +134,7 @@ export function parseJmaStrongMotionFile(fileName: string, text: string): ParseR
     return tokens.length >= 2 && tokens.some((token) => token === 'NS') && tokens.some((token) => token === 'EW');
   });
 
-  if (!siteLine || !samplingLine || !initialTimeLine || componentLineIndex < 0) {
+  if (!siteLine || !samplingLine || !unitLine || !initialTimeLine || componentLineIndex < 0) {
     warnings.push(`${fileName}: JMA strong-motion header was incomplete.`);
     return { records: [], warnings };
   }
@@ -130,7 +144,7 @@ export function parseJmaStrongMotionFile(fileName: string, text: string): ParseR
     stationLat: latLine ? parseLabeledNumber(latLine) : undefined,
     stationLon: lonLine ? parseLabeledNumber(lonLine) : undefined,
     samplingHz: parseSamplingHz(samplingLine),
-    unit: unitLine?.replace(/^UNIT\s*=/i, '').trim(),
+    unit: unitLine?.split(',')[0].replace(/^UNIT\s*=/i, '').trim(),
     initialTime: parseInitialTime(initialTimeLine),
   };
 
@@ -138,23 +152,34 @@ export function parseJmaStrongMotionFile(fileName: string, text: string): ParseR
     warnings.push(`${fileName}: Could not read JMA sampling rate.`);
     return { records: [], warnings };
   }
+  if (!isGalUnit(header.unit)) {
+    warnings.push(`${fileName}: JMA acceleration unit must be gal or cm/s²; the file was not imported.`);
+    return { records: [], warnings };
+  }
 
-  const componentLabels = splitCsvLine(lines[componentLineIndex]);
-  const columns = componentLabels.map((): number[] => []);
+  const componentColumns = splitCsvLine(lines[componentLineIndex])
+    .map((label, columnIndex) => ({ label, columnIndex }))
+    .filter(({ label }) => label.length > 0);
+  const columns = componentColumns.map((): number[] => []);
 
   for (let lineIndex = componentLineIndex + 1; lineIndex < lines.length; lineIndex += 1) {
     const tokens = splitCsvLine(lines[lineIndex]);
-    componentLabels.forEach((_, columnIndex) => {
-      const value = Number(tokens[columnIndex]);
-      if (Number.isFinite(value)) columns[columnIndex].push(value);
+    const row = componentColumns.map(({ columnIndex }) => {
+      const token = tokens[columnIndex];
+      return token === undefined || token === '' ? Number.NaN : Number(token);
     });
+    if (row.some((value) => !Number.isFinite(value))) {
+      warnings.push(`${fileName}: Invalid or missing JMA sample at data row ${lineIndex - componentLineIndex}; the file was not imported.`);
+      return { records: [], warnings };
+    }
+    row.forEach((value, columnIndex) => columns[columnIndex].push(value));
   }
 
   const records: WaveformRecord[] = [];
   const samplingHz = header.samplingHz;
   const dt = 1 / samplingHz;
 
-  componentLabels.forEach((label, index) => {
+  componentColumns.forEach(({ label }, index) => {
     const values = columns[index];
     if (values.length < 2) return;
     const component = componentFromLabel(label, index);

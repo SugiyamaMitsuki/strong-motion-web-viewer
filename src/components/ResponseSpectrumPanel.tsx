@@ -167,6 +167,7 @@ export function ResponseSpectrumPanel({ waveforms, settings }: ResponseSpectrumP
           </select>
         </label>
         <span className="note">Damping h = {(settings.dampingRatio * 100).toFixed(1)}%</span>
+        <span className="note">Periods exceeding the safe substep limit are omitted.</span>
       </div>
       <SvgChart
         title={chartTitle}

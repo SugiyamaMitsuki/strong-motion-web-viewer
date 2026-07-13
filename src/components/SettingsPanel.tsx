@@ -59,6 +59,7 @@ export function SettingsPanel({ settings, onChange }: SettingsPanelProps): JSX.E
           <input
             type="number"
             min="0.01"
+            max="100"
             step="0.1"
             value={settings.responseSpectrum.maxPeriod}
             onChange={(event) => update({ responseSpectrum: { ...settings.responseSpectrum, maxPeriod: Number(event.target.value) || 10 } })}

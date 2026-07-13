@@ -44,6 +44,16 @@ const defaultSettings: AppSettings = {
   },
 };
 
+const jmaInputSettings: AppSettings['preprocess'] = {
+  removeMean: false,
+  detrend: false,
+  applyHighpass: false,
+  highpassHz: 0.05,
+  applyLowpass: false,
+  lowpassHz: 20,
+  correctIntegrationDrift: false,
+};
+
 function tabLabel(tab: TabKey): string {
   switch (tab) {
     case 'summary': return 'Summary';
@@ -84,8 +94,9 @@ export default function App(): JSX.Element {
   const [loading, setLoading] = useState(false);
 
   const derivedWaveforms = useMemo(() => buildDerivedWaveforms(records, settings.preprocess), [records, settings.preprocess]);
+  const jmaWaveforms = useMemo(() => buildDerivedWaveforms(records, jmaInputSettings), [records]);
   const peaks = useMemo(() => computePeakSummary(derivedWaveforms), [derivedWaveforms]);
-  const intensity = useMemo(() => computeJmaIntensity(derivedWaveforms), [derivedWaveforms]);
+  const intensity = useMemo(() => computeJmaIntensity(jmaWaveforms), [jmaWaveforms]);
 
   const parseFiles = async (files: File[]): Promise<void> => {
     setLoading(true);
@@ -250,6 +261,7 @@ export default function App(): JSX.Element {
           {activeTab === 'report' && (
             <ReportFigurePanel
               waveforms={derivedWaveforms}
+              jmaWaveforms={jmaWaveforms}
               peaks={peaks}
               responseSettings={settings.responseSpectrum}
             />
