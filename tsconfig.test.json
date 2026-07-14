@@ -15,13 +15,19 @@
   },
   "include": [
     "src/analysis/calculus.ts",
+    "src/analysis/distance.ts",
     "src/analysis/fft.ts",
+    "src/analysis/horizontalVerticalRatio.ts",
     "src/analysis/jmaIntensity.ts",
     "src/analysis/orbit.ts",
     "src/analysis/responseSpectrum.ts",
     "src/analysis/statistics.ts",
+    "src/analysis/wavelet.ts",
     "src/parsers/jma.ts",
+    "src/export/exportImage.ts",
     "src/utils/file.ts",
+    "src/visualization/downsample.ts",
+    "src/visualization/plotGeometry.ts",
     "src/types/waveform.ts"
   ]
 }

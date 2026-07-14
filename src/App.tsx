@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useState, type KeyboardEvent } from 'react';
 import { buildDerivedWaveforms } from './analysis/derive';
 import { computeJmaIntensity } from './analysis/jmaIntensity';
 import { computePeakSummary } from './analysis/peaks';
@@ -21,6 +21,8 @@ import { isSupportedWaveformFileName, makeId, readFileAsText } from './utils/fil
 import './styles.css';
 
 type TabKey = 'summary' | 'time' | 'orbit' | 'fourier' | 'wavelet' | 'hvsr' | 'response' | 'report' | 'export';
+
+const ANALYSIS_TABS: readonly TabKey[] = ['summary', 'time', 'orbit', 'fourier', 'wavelet', 'hvsr', 'response', 'report', 'export'];
 
 const defaultSettings: AppSettings = {
   csv: {
@@ -97,6 +99,24 @@ export default function App(): JSX.Element {
   const jmaWaveforms = useMemo(() => buildDerivedWaveforms(records, jmaInputSettings), [records]);
   const peaks = useMemo(() => computePeakSummary(derivedWaveforms), [derivedWaveforms]);
   const intensity = useMemo(() => computeJmaIntensity(jmaWaveforms), [jmaWaveforms]);
+  const components = useMemo(
+    () => [...new Set(records.map((record) => record.componentLabel))].join(' / '),
+    [records],
+  );
+  const samplingSummary = useMemo(() => {
+    const rates = [...new Set(records.map((record) => Number(record.samplingHz.toPrecision(8))))];
+    return rates.length === 1 ? `${rates[0]} Hz` : `${rates.length} rates`;
+  }, [records]);
+  const stationSummary = useMemo(() => {
+    const stations = new Set(records.map((record) => {
+      const { stationCode, stationLat, stationLon } = record.metadata;
+      if (stationCode?.trim()) return stationCode.trim();
+      if (Number.isFinite(stationLat) && Number.isFinite(stationLon)) return `${stationLat},${stationLon}`;
+      return 'Unspecified';
+    }));
+    if (stations.size === 1) return [...stations][0];
+    return `${stations.size} stations`;
+  }, [records]);
 
   const parseFiles = async (files: File[]): Promise<void> => {
     setLoading(true);
@@ -196,86 +216,156 @@ export default function App(): JSX.Element {
     }
   };
 
+  const onTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, tab: TabKey): void => {
+    const index = ANALYSIS_TABS.indexOf(tab);
+    let nextIndex: number | undefined;
+    if (event.key === 'ArrowRight') nextIndex = (index + 1) % ANALYSIS_TABS.length;
+    if (event.key === 'ArrowLeft') nextIndex = (index - 1 + ANALYSIS_TABS.length) % ANALYSIS_TABS.length;
+    if (event.key === 'Home') nextIndex = 0;
+    if (event.key === 'End') nextIndex = ANALYSIS_TABS.length - 1;
+    if (nextIndex === undefined) return;
+    event.preventDefault();
+    const nextTab = ANALYSIS_TABS[nextIndex];
+    setActiveTab(nextTab);
+    document.getElementById(`analysis-tab-${nextTab}`)?.focus();
+  };
+
   return (
-    <div className="app-shell">
-      <header className="hero">
-        <div>
-          <h1>Strong Motion Web Viewer</h1>
-          <p>Analyze K-NET, KiK-net, and CSV waveform data entirely in the browser. Files are not uploaded to a server.</p>
-        </div>
-        <div className="hero-actions">
-          <button type="button" onClick={() => void loadSample()} disabled={loading}>Load Real Sample</button>
-        </div>
-      </header>
-
-      <DropZone onFiles={(files) => void parseFiles(files)} loading={loading} />
-      <ManualFormatImportPanel
-        files={manualFiles}
-        onImport={(fileId, importedRecords, importWarnings) => {
-          setRecords((current) => [...current, ...importedRecords]);
-          setManualFiles((current) => current.filter((file) => file.id !== fileId));
-          setWarnings((current) => [...importWarnings, ...current].slice(0, 50));
-          setActiveTab('summary');
-        }}
-        onRemove={(fileId) => setManualFiles((current) => current.filter((file) => file.id !== fileId))}
-        onWarnings={(manualWarnings) => setWarnings((current) => [...manualWarnings, ...current].slice(0, 50))}
-      />
-      <SettingsPanel settings={settings} onChange={setSettings} />
-
-      {warnings.length > 0 && (
-        <section className="panel warnings">
-          <div className="panel-header">
-            <h2>Warnings / Log</h2>
-            <button type="button" className="secondary" onClick={() => setWarnings([])}>Clear</button>
+    <>
+      <a className="skip-link" href="#main-content">Skip to analysis workspace</a>
+      <div className="app-shell">
+        <header className="hero">
+          <div className="hero-copy">
+            <span className="eyebrow">Browser-based strong-motion analysis</span>
+            <h1>Strong Motion Web Viewer</h1>
+            <p>Inspect K-NET, KiK-net, and CSV waveforms with reproducible engineering plots. Analysis remains entirely on this device.</p>
+            <div className="hero-facts" aria-label="Application capabilities">
+              <span>Local-only processing</span>
+              <span>Vector figure export</span>
+              <span>Numerically tested</span>
+            </div>
           </div>
-          <ul>
-            {warnings.map((warning, index) => <li key={`${warning}-${index}`}>{warning}</li>)}
-          </ul>
-        </section>
-      )}
+          <div className="hero-actions">
+            <button type="button" onClick={() => void loadSample()} disabled={loading}>Explore real K-NET sample</button>
+          </div>
+        </header>
 
-      <RecordTable records={records} onRecordsChange={setRecords} />
+        <main id="main-content" aria-busy={loading}>
+          <ol className="workflow-strip" aria-label="Analysis workflow">
+            <li><span>01</span><strong>Load</strong><small>Waveform files stay local</small></li>
+            <li><span>02</span><strong>Condition</strong><small>Review processing settings</small></li>
+            <li><span>03</span><strong>Analyze &amp; export</strong><small>Publication-ready SVG / PNG</small></li>
+          </ol>
 
-      <section className="panel analysis-panel">
-        <nav className="tabs" aria-label="Analysis views">
-          {(['summary', 'time', 'orbit', 'fourier', 'wavelet', 'hvsr', 'response', 'report', 'export'] as TabKey[]).map((tab) => (
-            <button
-              key={tab}
-              type="button"
-              className={activeTab === tab ? 'active' : ''}
-              onClick={() => setActiveTab(tab)}
-            >
-              {tabLabel(tab)}
-            </button>
-          ))}
-        </nav>
+          <DropZone onFiles={(files) => void parseFiles(files)} loading={loading} />
+          <ManualFormatImportPanel
+            files={manualFiles}
+            onImport={(fileId, importedRecords, importWarnings) => {
+              setRecords((current) => [...current, ...importedRecords]);
+              setManualFiles((current) => current.filter((file) => file.id !== fileId));
+              setWarnings((current) => [...importWarnings, ...current].slice(0, 50));
+              setActiveTab('summary');
+            }}
+            onRemove={(fileId) => setManualFiles((current) => current.filter((file) => file.id !== fileId))}
+            onWarnings={(manualWarnings) => setWarnings((current) => [...manualWarnings, ...current].slice(0, 50))}
+          />
+          <SettingsPanel settings={settings} onChange={setSettings} />
 
-        <div className="tab-content">
-          {activeTab === 'summary' && <SummaryPanel records={records} onRecordsChange={setRecords} peaks={peaks} intensity={intensity} />}
-          {activeTab === 'time' && <TimeHistoryPanel waveforms={derivedWaveforms} />}
-          {activeTab === 'orbit' && <ParticleOrbitPanel waveforms={derivedWaveforms} />}
-          {activeTab === 'fourier' && <FourierPanel waveforms={derivedWaveforms} />}
-          {activeTab === 'wavelet' && <WaveletPanel waveforms={derivedWaveforms} />}
-          {activeTab === 'hvsr' && <HorizontalVerticalRatioPanel waveforms={derivedWaveforms} />}
-          {activeTab === 'response' && <ResponseSpectrumPanel waveforms={derivedWaveforms} settings={settings.responseSpectrum} />}
-          {activeTab === 'report' && (
-            <ReportFigurePanel
-              waveforms={derivedWaveforms}
-              jmaWaveforms={jmaWaveforms}
-              peaks={peaks}
-              responseSettings={settings.responseSpectrum}
-            />
+          {warnings.length > 0 && (
+            <section className="panel warnings" role="status" aria-live="polite">
+              <div className="panel-header">
+                <h2>Warnings / log</h2>
+                <button type="button" className="secondary" onClick={() => setWarnings([])}>Clear</button>
+              </div>
+              <ul>
+                {warnings.map((warning, index) => <li key={`${warning}-${index}`}>{warning}</li>)}
+              </ul>
+            </section>
           )}
-          {activeTab === 'export' && (
-            <ExportPanel
-              waveforms={derivedWaveforms}
-              responseSettings={settings.responseSpectrum}
-              peaks={peaks}
-              intensity={intensity}
-            />
+
+          <RecordTable records={records} onRecordsChange={setRecords} />
+
+          {records.length === 0 ? (
+            <section className="panel analysis-empty" aria-labelledby="analysis-empty-title">
+              <span className="section-number">03</span>
+              <h2 id="analysis-empty-title">Analysis workspace</h2>
+              <p>Load a waveform set to activate time histories, spectra, H/V ratios, wavelets, orbits, and the A4 report figure.</p>
+              <button type="button" className="secondary" onClick={() => void loadSample()} disabled={loading}>Use the real K-NET sample</button>
+            </section>
+          ) : (
+            <section className="panel analysis-panel" aria-labelledby="analysis-title">
+              <div className="analysis-heading">
+                <div>
+                  <span className="section-number">03</span>
+                  <h2 id="analysis-title">Analysis workspace</h2>
+                  <p className="note">Figures share a colourblind-safe palette, independent line patterns, and self-contained exports.</p>
+                </div>
+                <dl className="dataset-context" aria-label="Active dataset">
+                  <div><dt>Station</dt><dd>{stationSummary}</dd></div>
+                  <div><dt>Components</dt><dd>{components || '—'}</dd></div>
+                  <div><dt>Sampling</dt><dd>{samplingSummary}</dd></div>
+                  <div><dt>Records</dt><dd>{records.length}</dd></div>
+                </dl>
+              </div>
+
+              <nav className="tabs" role="tablist" aria-label="Analysis views">
+                {ANALYSIS_TABS.map((tab) => (
+                  <button
+                    key={tab}
+                    id={`analysis-tab-${tab}`}
+                    type="button"
+                    role="tab"
+                    className={activeTab === tab ? 'active' : ''}
+                    aria-selected={activeTab === tab}
+                    aria-controls="analysis-panel"
+                    tabIndex={activeTab === tab ? 0 : -1}
+                    onClick={() => setActiveTab(tab)}
+                    onKeyDown={(event) => onTabKeyDown(event, tab)}
+                  >
+                    {tabLabel(tab)}
+                  </button>
+                ))}
+              </nav>
+
+              <div
+                id="analysis-panel"
+                className="tab-content"
+                role="tabpanel"
+                aria-labelledby={`analysis-tab-${activeTab}`}
+                tabIndex={0}
+              >
+                {activeTab === 'summary' && <SummaryPanel records={records} onRecordsChange={setRecords} peaks={peaks} intensity={intensity} />}
+                {activeTab === 'time' && <TimeHistoryPanel waveforms={derivedWaveforms} />}
+                {activeTab === 'orbit' && <ParticleOrbitPanel waveforms={derivedWaveforms} />}
+                {activeTab === 'fourier' && <FourierPanel waveforms={derivedWaveforms} />}
+                {activeTab === 'wavelet' && <WaveletPanel waveforms={derivedWaveforms} />}
+                {activeTab === 'hvsr' && <HorizontalVerticalRatioPanel waveforms={derivedWaveforms} />}
+                {activeTab === 'response' && <ResponseSpectrumPanel waveforms={derivedWaveforms} settings={settings.responseSpectrum} />}
+                {activeTab === 'report' && (
+                  <ReportFigurePanel
+                    waveforms={derivedWaveforms}
+                    jmaWaveforms={jmaWaveforms}
+                    peaks={peaks}
+                    responseSettings={settings.responseSpectrum}
+                  />
+                )}
+                {activeTab === 'export' && (
+                  <ExportPanel
+                    waveforms={derivedWaveforms}
+                    responseSettings={settings.responseSpectrum}
+                    peaks={peaks}
+                    intensity={intensity}
+                  />
+                )}
+              </div>
+            </section>
           )}
-        </div>
-      </section>
-    </div>
+        </main>
+
+        <footer className="app-footer">
+          <p>Client-side analysis. Verify processing assumptions and results before formal engineering or research use.</p>
+        </footer>
+      </div>
+    </>
   );
 }

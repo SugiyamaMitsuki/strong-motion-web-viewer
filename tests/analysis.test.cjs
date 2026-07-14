@@ -12,7 +12,13 @@ const {
   computeSingleResponseSpectrum,
   generateLogPeriods,
 } = require('../.test-dist/src/analysis/responseSpectrum.js');
+const { computeMorletWavelet } = require('../.test-dist/src/analysis/wavelet.js');
 const { parseJmaStrongMotionFile } = require('../.test-dist/src/parsers/jma.js');
+const { downsampleExtrema, downsampleSegments } = require('../.test-dist/src/visualization/downsample.js');
+const {
+  resolveSvgPhysicalSize,
+  setPngResolutionMetadata,
+} = require('../.test-dist/src/export/exportImage.js');
 
 function maxAbsoluteDifference(actual, expected) {
   assert.equal(actual.length, expected.length);
@@ -34,6 +40,34 @@ function refinePiecewiseLinear(values, subdivisions) {
     }
   }
   return refined;
+}
+
+function minimalPngHeader() {
+  const bytes = new Uint8Array(33);
+  bytes.set([137, 80, 78, 71, 13, 10, 26, 10], 0);
+  const view = new DataView(bytes.buffer);
+  view.setUint32(8, 13, false);
+  bytes.set([73, 72, 68, 82], 12);
+  return bytes;
+}
+
+function pngChunks(bytes) {
+  const chunks = [];
+  let offset = 8;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  while (offset + 12 <= bytes.length) {
+    const length = view.getUint32(offset, false);
+    const end = offset + 12 + length;
+    assert.ok(end <= bytes.length);
+    chunks.push({
+      offset,
+      length,
+      type: String.fromCharCode(...bytes.slice(offset + 4, offset + 8)),
+    });
+    offset = end;
+  }
+  assert.equal(offset, bytes.length);
+  return chunks;
 }
 
 function derivedWaveform({
@@ -601,4 +635,113 @@ test('zero acceleration produces zero response at every period', () => {
     assert.equal(point.psv, 0);
     assert.equal(point.psa, 0);
   });
+});
+
+test('figure decimation preserves narrow positive and negative pulses', () => {
+  const x = Array.from({ length: 10000 }, (_, index) => index * 0.01);
+  const y = Array(10000).fill(0);
+  y[5432] = 127.5;
+  y[6789] = -91.25;
+
+  const sampled = downsampleExtrema(x, y, 240);
+  assert.ok(sampled.x.length <= 240);
+  assert.ok(sampled.y.includes(127.5));
+  assert.ok(sampled.y.includes(-91.25));
+  assert.equal(sampled.x[0], x[0]);
+  assert.equal(sampled.x[sampled.x.length - 1], x[x.length - 1]);
+});
+
+test('figure decimation splits invalid gaps before sampling', () => {
+  const segments = downsampleSegments(
+    [0, 1, 2, 3, 4, 5],
+    [0, 1, Number.NaN, 3, 4, 5],
+    4,
+  );
+
+  assert.equal(segments.length, 2);
+  assert.deepEqual(segments[0], { x: [0, 1], y: [0, 1] });
+  assert.deepEqual(segments[1], { x: [3, 5], y: [3, 5] });
+  assert.equal(segments.reduce((sum, segment) => sum + segment.x.length, 0), 4);
+});
+
+test('figure decimation enforces one total budget across many finite segments', () => {
+  const x = [];
+  const y = [];
+  for (let segment = 0; segment < 12; segment += 1) {
+    x.push(segment * 2, segment * 2 + 0.5, segment * 2 + 1);
+    y.push(segment, segment + 0.25, segment + 0.5);
+    if (segment < 11) {
+      x.push(segment * 2 + 1.5);
+      y.push(Number.NaN);
+    }
+  }
+
+  const budget = 17;
+  const segments = downsampleSegments(x, y, budget);
+  assert.ok(segments.length > 1);
+  assert.ok(segments.reduce((sum, segment) => sum + segment.x.length, 0) <= budget);
+
+  const fragmented = downsampleSegments(
+    Array.from({ length: 39 }, (_, index) => index),
+    Array.from({ length: 39 }, (_, index) => index % 2 === 0 ? index : Number.NaN),
+    5,
+  );
+  assert.equal(fragmented.reduce((sum, segment) => sum + segment.x.length, 0), 5);
+});
+
+test('L2-normalized Morlet coefficients report input units multiplied by square-root seconds', () => {
+  const dt = 0.02;
+  const values = Array.from({ length: 128 }, (_, index) => Math.sin(2 * Math.PI * index * dt));
+  const result = computeMorletWavelet(values, dt, 'cm/s²', {
+    minFrequency: 0.5,
+    maxFrequency: 5,
+    frequencyCount: 8,
+    maxSamples: 128,
+  });
+
+  assert.equal(result.inputUnit, 'cm/s²');
+  assert.equal(result.unit, 'cm/s²·√s');
+  assert.equal(result.normalization, 'L2');
+  assert.ok(result.amplitude.length > 0);
+});
+
+test('publication SVG sizing preserves aspect ratio and accepts exact A4 dimensions', () => {
+  const defaultSize = resolveSvgPhysicalSize(900, 430);
+  assert.equal(defaultSize.widthMm, 183);
+  assert.ok(Math.abs(defaultSize.heightMm - 183 * 430 / 900) < 1e-12);
+  assert.deepEqual(resolveSvgPhysicalSize(1120, 1584, { widthMm: 210, heightMm: 297 }), {
+    widthMm: 210,
+    heightMm: 297,
+  });
+  assert.deepEqual(resolveSvgPhysicalSize(980, 620, { heightMm: 100 }), {
+    widthMm: 100 * 980 / 620,
+    heightMm: 100,
+  });
+});
+
+test('publication PNG export stores 300 dpi physical resolution metadata', () => {
+  const output = setPngResolutionMetadata(minimalPngHeader(), 300);
+  const chunks = pngChunks(output);
+  const resolution = chunks.find((chunk) => chunk.type === 'pHYs');
+  assert.ok(resolution);
+  const view = new DataView(output.buffer, output.byteOffset, output.byteLength);
+
+  assert.equal(output.length, 54);
+  assert.deepEqual(chunks.map((chunk) => chunk.type), ['IHDR', 'pHYs']);
+  assert.equal(view.getUint32(resolution.offset + 8, false), 11811);
+  assert.equal(view.getUint32(resolution.offset + 12, false), 11811);
+  assert.equal(output[resolution.offset + 16], 1);
+});
+
+test('publication PNG export replaces an existing pHYs chunk instead of duplicating it', () => {
+  const with300Dpi = setPngResolutionMetadata(minimalPngHeader(), 300);
+  const with600Dpi = setPngResolutionMetadata(with300Dpi, 600);
+  const chunks = pngChunks(with600Dpi);
+  const resolutionChunks = chunks.filter((chunk) => chunk.type === 'pHYs');
+  const view = new DataView(with600Dpi.buffer, with600Dpi.byteOffset, with600Dpi.byteLength);
+
+  assert.equal(with600Dpi.length, with300Dpi.length);
+  assert.equal(resolutionChunks.length, 1);
+  assert.equal(view.getUint32(resolutionChunks[0].offset + 8, false), 23622);
+  assert.equal(view.getUint32(resolutionChunks[0].offset + 12, false), 23622);
 });

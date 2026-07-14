@@ -65,7 +65,7 @@ export function HorizontalVerticalRatioPanel({ waveforms }: HorizontalVerticalRa
   const [smoothing, setSmoothing] = useState<SmoothingLevel>('standard');
   const [horizontalMerge, setHorizontalMerge] = useState<HorizontalMergeMethod>('geometric');
   const [resolution, setResolution] = useState<FrequencyResolution>('standard');
-  const [yRangeMode, setYRangeMode] = useState<YRangeMode>('robust');
+  const [yRangeMode, setYRangeMode] = useState<YRangeMode>('full');
 
   const results = useMemo(
     () => computeHorizontalVerticalRatios(waveforms, quantity, {
@@ -84,6 +84,16 @@ export function HorizontalVerticalRatioPanel({ waveforms }: HorizontalVerticalRa
     y: result.ratio,
   })), [availableResults]);
   const yDomain = useMemo(() => hvsrYDomain(series, yRangeMode), [series, yRangeMode]);
+  const plottedSeries = useMemo<ChartSeries[]>(() => [
+    ...series,
+    {
+      id: 'hvsr-reference-one',
+      name: 'H/V = 1 reference',
+      x: [0.05, 50],
+      y: [1, 1],
+      style: { color: '#4B5563', dashArray: '4 3' },
+    },
+  ], [series]);
 
   if (waveforms.length === 0) return <p className="empty-state">No data is available for H/V spectral ratios.</p>;
 
@@ -125,8 +135,8 @@ export function HorizontalVerticalRatioPanel({ waveforms }: HorizontalVerticalRa
         <label>
           Y Range
           <select value={yRangeMode} onChange={(event) => setYRangeMode(event.target.value as YRangeMode)}>
-            <option value="robust">Robust</option>
-            <option value="full">Full</option>
+            <option value="full">Full (publication)</option>
+            <option value="robust">Robust (screen inspection)</option>
           </select>
         </label>
         <span className="note">5% time taper, Konno-Ohmachi smoothing, log-frequency grid.</span>
@@ -137,39 +147,41 @@ export function HorizontalVerticalRatioPanel({ waveforms }: HorizontalVerticalRa
           <SvgChart
             title={`Horizontal-to-Vertical Spectral Ratio: ${quantityLabel(quantity)}`}
             xLabel="Frequency [Hz]"
-            yLabel="H/V Ratio"
-            series={series}
+            yLabel="H/V ratio [–]"
+            series={plottedSeries}
             xScale="log"
             yScale="linear"
             domainX={[0.05, 50]}
             domainY={yDomain}
             fileNameBase={`horizontal_vertical_ratio_${quantity}`}
             height={430}
+            description={`${quantityLabel(quantity)} H/V spectral ratio. Horizontal merge: ${horizontalMerge}. Konno–Ohmachi bandwidth b = ${SMOOTHING_BANDWIDTH[smoothing] || 'none'}. Five percent time taper. ${yRangeMode === 'robust' ? 'The displayed ordinate uses a robust range and may clip extreme values.' : 'The full positive ordinate range is displayed.'}`}
           />
 
           <section className="panel summary-card">
             <h2>H/V Peak Values</h2>
             <div className="table-wrapper">
               <table>
+                <caption className="sr-only">Peak horizontal-to-vertical spectral ratios by event and station group</caption>
                 <thead>
                   <tr>
-                    <th>Group</th>
-                    <th>Horizontal</th>
-                    <th>Vertical</th>
-                    <th>Peak Frequency [Hz]</th>
-                    <th>Peak Period [s]</th>
-                    <th>Peak H/V</th>
+                    <th scope="col">Group</th>
+                    <th scope="col">Horizontal</th>
+                    <th scope="col">Vertical</th>
+                    <th scope="col" className="numeric">Peak Frequency [Hz]</th>
+                    <th scope="col" className="numeric">Peak Period [s]</th>
+                    <th scope="col" className="numeric">Peak H/V</th>
                   </tr>
                 </thead>
                 <tbody>
                   {availableResults.map((result) => (
                     <tr key={result.id}>
-                      <td>{result.label}</td>
+                      <th scope="row">{result.label}</th>
                       <td>{result.horizontalComponents.join(' / ')}</td>
                       <td>{result.verticalComponent}</td>
-                      <td>{result.peakFrequency !== undefined ? formatNumber(result.peakFrequency, 5) : '-'}</td>
-                      <td>{result.peakPeriod !== undefined ? formatNumber(result.peakPeriod, 5) : '-'}</td>
-                      <td>{result.peakRatio !== undefined ? formatNumber(result.peakRatio, 5) : '-'}</td>
+                      <td className="numeric">{result.peakFrequency !== undefined ? formatNumber(result.peakFrequency, 5) : '-'}</td>
+                      <td className="numeric">{result.peakPeriod !== undefined ? formatNumber(result.peakPeriod, 5) : '-'}</td>
+                      <td className="numeric">{result.peakRatio !== undefined ? formatNumber(result.peakRatio, 5) : '-'}</td>
                     </tr>
                   ))}
                 </tbody>

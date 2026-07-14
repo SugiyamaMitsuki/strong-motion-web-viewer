@@ -8,10 +8,23 @@ interface SettingsPanelProps {
 export function SettingsPanel({ settings, onChange }: SettingsPanelProps): JSX.Element {
   const update = (patch: Partial<AppSettings>): void => onChange({ ...settings, ...patch });
 
+  const activeFilters = [
+    settings.preprocess.removeMean && 'mean',
+    settings.preprocess.detrend && 'trend',
+    settings.preprocess.applyHighpass && `HP ${settings.preprocess.highpassHz} Hz`,
+    settings.preprocess.applyLowpass && `LP ${settings.preprocess.lowpassHz} Hz`,
+    settings.preprocess.correctIntegrationDrift && 'drift correction',
+  ].filter(Boolean).join(' · ');
+
   return (
-    <section className="panel settings-panel">
-      <h2>Analysis Settings</h2>
-      <div className="settings-grid">
+    <details className="panel settings-panel">
+      <summary>
+        <span className="settings-summary-title"><span className="section-number">02</span><strong>Processing and analysis settings</strong></span>
+        <span className="settings-summary-value">{activeFilters || 'No preprocessing'} · h={(settings.responseSpectrum.dampingRatio * 100).toFixed(1)}%</span>
+      </summary>
+      <div className="settings-content">
+        <p className="note">These settings control derived waveforms and spectra. JMA instrumental intensity is calculated from the original acceleration records.</p>
+        <div className="settings-grid">
         <label>
           Default CSV Sampling Frequency [Hz]
           <input
@@ -76,8 +89,8 @@ export function SettingsPanel({ settings, onChange }: SettingsPanelProps): JSX.E
             onChange={(event) => update({ responseSpectrum: { ...settings.responseSpectrum, periodCount: Number(event.target.value) || 500 } })}
           />
         </label>
-      </div>
-      <div className="checkbox-grid">
+        </div>
+        <div className="checkbox-grid">
         <label><input type="checkbox" checked={settings.preprocess.removeMean} onChange={(event) => update({ preprocess: { ...settings.preprocess, removeMean: event.target.checked } })} /> Remove Mean</label>
         <label><input type="checkbox" checked={settings.preprocess.detrend} onChange={(event) => update({ preprocess: { ...settings.preprocess, detrend: event.target.checked } })} /> Remove Linear Trend</label>
         <label><input type="checkbox" checked={settings.preprocess.correctIntegrationDrift} onChange={(event) => update({ preprocess: { ...settings.preprocess, correctIntegrationDrift: event.target.checked } })} /> Correct Integration Drift</label>
@@ -103,7 +116,8 @@ export function SettingsPanel({ settings, onChange }: SettingsPanelProps): JSX.E
             onChange={(event) => update({ preprocess: { ...settings.preprocess, lowpassHz: Number(event.target.value) || 0 } })}
           />
         </label>
+        </div>
       </div>
-    </section>
+    </details>
   );
 }

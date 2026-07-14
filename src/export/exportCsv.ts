@@ -118,6 +118,7 @@ export function buildDistanceCsv(records: DerivedWaveform[]): string {
     metadata: record.metadata,
   })));
   const headers = [
+    'event',
     'station',
     'components',
     'source_lat',
@@ -132,7 +133,8 @@ export function buildDistanceCsv(records: DerivedWaveform[]): string {
 
   for (const row of rows) {
     lines.push([
-      row.label,
+      row.eventLabel,
+      row.stationLabel,
       row.components.join(' / '),
       row.eventLat !== undefined ? formatNumber(row.eventLat, 8) : '',
       row.eventLon !== undefined ? formatNumber(row.eventLon, 8) : '',

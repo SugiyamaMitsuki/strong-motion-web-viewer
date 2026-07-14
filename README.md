@@ -36,6 +36,7 @@ https://sugiyamamitsuki.github.io/strong-motion-web-viewer/
   - Displacement
   - Switchable overlay and separate NS/EW/UD component views
   - Maximum absolute amplitude and occurrence time annotations
+  - Peak-preserving display decimation and explicit breaks across missing samples
 - Particle orbit plots
   - EW-NS, EW-UD, and NS-UD projections
   - Acceleration, velocity, and displacement modes
@@ -47,15 +48,20 @@ https://sugiyamamitsuki.github.io/strong-motion-web-viewer/
   - Continuous wavelet transform with Morlet wavelet `omega0 = 8`
   - Frequency or period Y-axis display
   - Fast / Standard / Detailed resolution options for browser-side calculation
-  - SVG and PNG export
+  - Perceptually uniform Viridis colour scale with explicit 5th–98th percentile limits
+  - Hatched Morlet cone-of-influence mask for edge-effect interpretation
+  - L2-normalized coefficients are labelled with their dimensional unit (`input unit · √s`)
+  - Self-contained SVG and 300 dpi PNG export
 - Horizontal-to-vertical spectral ratio
+  - Station/channel sets are separated by event identity so different earthquakes are never combined
   - Default horizontal combination follows the SESAME-style geometric mean: H/V = `sqrt(NS * EW) / UD`
   - RMS combination is also available: H/V = `sqrt((NS² + EW²) / 2) / UD`
   - If only one horizontal component is available, that component is divided by UD
   - Uses a 5% cosine time taper, FFT, and Konno-Ohmachi smoothing before taking the ratio
   - Computed on a logarithmic frequency grid with Fast / Standard / Detailed resolution options
   - Smoothing can be set to None, Light, Standard, or Strong
-  - Y-axis range can be switched between robust outlier-resistant scaling and full-range scaling
+  - Y-axis range can be switched between publication-default full-range scaling and robust screen-inspection scaling
+  - Includes an H/V = 1 reference line
   - Peak frequency, peak period, and peak H/V ratio are displayed
 - Response spectra
   - Nigam-Jennings method
@@ -82,13 +88,17 @@ https://sugiyamamitsuki.github.io/strong-motion-web-viewer/
   - Displays the epicenter when event latitude and longitude are available
 - Location and distance tools
   - Source latitude, source longitude, source depth, station latitude, and station longitude can be manually edited
-  - Epicentral distance and hypocentral distance are calculated
+  - Epicentral and hypocentral distances are calculated independently for each event/station pair
+  - Source editing is disabled when multiple events are loaded to prevent an accidental global overwrite
 - Report overview figure
   - Combines record metadata, latitude/longitude, distances, ground motion strength, stacked acceleration/velocity waveforms, and tripartite response spectrum in an A4 portrait report-ready figure
-  - Exports the overview figure as SVG or PNG
+  - Separates events and KiK-net channel suffixes before analysis
+  - Uses a shared ordinate; parseable record timestamps are aligned to the earliest start, otherwise the component-relative time reference is stated explicitly
+  - Exports an editable SVG or exact A4-width 300 dpi PNG with embedded resolution metadata
 - Figure export
-  - SVG
-  - PNG
+  - Self-contained SVG with physical millimetre dimensions, inlined presentation styles, and embedded method metadata
+  - 183 mm-wide 300 dpi PNG for charts and 210 mm-wide 300 dpi PNG for the A4 report
+  - Colourblind-safe component palette with independent dash patterns for greyscale reproduction
 - Data export
   - Time-history CSV
   - Distance CSV
@@ -100,8 +110,10 @@ https://sugiyamamitsuki.github.io/strong-motion-web-viewer/
 
 ## Local Development
 
+Node.js 24 and npm 11 are required. The repository includes `.node-version` and a pinned npm package-manager version.
+
 ```bash
-npm install
+npm ci
 npm run dev
 ```
 
@@ -174,5 +186,7 @@ src/components/WaveletPanel.tsx             Wavelet scalogram view
 src/components/ReportFigurePanel.tsx        Report-ready overview figure
 src/components/StationMap.tsx               Station map
 src/components/SvgChart.tsx                 SVG chart and PNG/SVG export
+src/visualization/chartStyle.ts             Publication palette and line-pattern mapping
+src/visualization/downsample.ts              Peak-preserving, gap-aware figure decimation
 src/export/                                 CSV/JSON/ZIP export
 ```

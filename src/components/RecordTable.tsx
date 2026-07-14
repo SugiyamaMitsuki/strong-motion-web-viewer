@@ -41,16 +41,17 @@ export function RecordTable({ records, onRecordsChange }: RecordTableProps): JSX
       </div>
       <div className="table-wrapper">
         <table>
+          <caption className="sr-only">Loaded waveform records and editable component metadata</caption>
           <thead>
             <tr>
-              <th>File</th>
-              <th>Format</th>
-              <th>Component</th>
-              <th>Quantity</th>
-              <th>fs [Hz]</th>
-              <th>Samples</th>
-              <th>Station</th>
-              <th></th>
+              <th scope="col">File</th>
+              <th scope="col">Format</th>
+              <th scope="col">Component</th>
+              <th scope="col">Quantity</th>
+              <th scope="col" className="numeric">fs [Hz]</th>
+              <th scope="col" className="numeric">Samples</th>
+              <th scope="col">Station</th>
+              <th scope="col"><span className="sr-only">Actions</span></th>
             </tr>
           </thead>
           <tbody>
@@ -61,6 +62,7 @@ export function RecordTable({ records, onRecordsChange }: RecordTableProps): JSX
                 <td>
                   <select
                     value={record.component}
+                    aria-label={`Component for ${record.fileName}`}
                     onChange={(event) => updateRecord(record.id, { component: event.target.value as ComponentCode })}
                   >
                     <option value="NS">NS</option>
@@ -72,6 +74,7 @@ export function RecordTable({ records, onRecordsChange }: RecordTableProps): JSX
                 <td>
                   <select
                     value={record.quantity}
+                    aria-label={`Quantity for ${record.fileName}`}
                     onChange={(event) => updateRecord(record.id, { quantity: event.target.value as Quantity })}
                   >
                     <option value="acceleration">Acceleration</option>
@@ -79,10 +82,10 @@ export function RecordTable({ records, onRecordsChange }: RecordTableProps): JSX
                     <option value="displacement">Displacement</option>
                   </select>
                 </td>
-                <td>{formatNumber(record.samplingHz, 4)}</td>
-                <td>{record.values.length.toLocaleString()}</td>
+                <td className="numeric">{formatNumber(record.samplingHz, 4)}</td>
+                <td className="numeric">{record.values.length.toLocaleString()}</td>
                 <td>{record.metadata.stationCode ?? '-'}</td>
-                <td><button type="button" className="danger" onClick={() => onRecordsChange(records.filter((r) => r.id !== record.id))}>Remove</button></td>
+                <td><button type="button" className="danger" aria-label={`Remove ${record.fileName}`} onClick={() => onRecordsChange(records.filter((r) => r.id !== record.id))}>Remove</button></td>
               </tr>
             ))}
           </tbody>

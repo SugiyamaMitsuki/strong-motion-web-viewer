@@ -59,6 +59,7 @@ export function DropZone({ onFiles, loading = false }: DropZoneProps): JSX.Eleme
   return (
     <section
       className={`drop-zone ${dragging ? 'dragging' : ''}`}
+      aria-busy={loading}
       onDragOver={(event) => {
         event.preventDefault();
         setDragging(true);
@@ -72,13 +73,14 @@ export function DropZone({ onFiles, loading = false }: DropZoneProps): JSX.Eleme
       }}
     >
       <div>
-        <h2>Import Files</h2>
+        <span className="section-number">01</span>
+        <h2>Import waveform data</h2>
         <p>Drag and drop K-NET / KiK-net, CSV, or manually configured text waveform data.</p>
         <p className="note">Browsers cannot read arbitrary local path strings directly. Use file selection, folder selection, or drag and drop.</p>
       </div>
       <div className="button-row">
-        <button type="button" onClick={() => inputRef.current?.click()} disabled={loading}>Select Files</button>
-        <button type="button" onClick={() => void openDirectory()} disabled={loading}>Select Folder</button>
+        <button type="button" onClick={() => inputRef.current?.click()} disabled={loading}>Select files</button>
+        <button type="button" className="secondary" onClick={() => void openDirectory()} disabled={loading}>Select folder</button>
       </div>
       <input
         ref={inputRef}

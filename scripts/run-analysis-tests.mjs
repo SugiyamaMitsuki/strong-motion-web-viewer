@@ -33,4 +33,4 @@ if (existsSync(localTsc)) await run(process.execPath, [localTsc, '-p', 'tsconfig
 else await run('tsc', ['-p', 'tsconfig.test.json']);
 await mkdir(outputDirectory, { recursive: true });
 await writeFile(path.join(outputDirectory, 'package.json'), '{"type":"commonjs"}\n', 'utf8');
-await run(process.execPath, ['--test', 'tests/analysis.test.cjs']);
+await run(process.execPath, ['--test', 'tests/analysis.test.cjs', 'tests/publication.test.cjs']);
