@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState } from 'react';
+import { downloadFigureMetadata } from '../export/figureMetadata';
 import { downloadPng, downloadSvg } from '../export/exportImage';
-import type { DerivedWaveform } from '../types/waveform';
+import type { DerivedWaveform, PreprocessSettings } from '../types/waveform';
 import { formatNumber, safeFileName } from '../utils/file';
 import { downsampleSegments } from '../visualization/downsample';
 import {
@@ -9,9 +10,16 @@ import {
   JOURNAL_LINE_ART_DPI,
   JOURNAL_MIN_LINE_PT,
   JOURNAL_PANEL_FONT_PT,
+  JOURNAL_SUPPORT_FONT_PT,
   pointsToUserUnits,
 } from '../visualization/journal';
 import { waveformSeriesLabel } from '../visualization/labels';
+import {
+  buildPublicationFigureContext,
+  publicationContextCaption,
+  publicationSymmetricLimit,
+} from '../visualization/publicationContext';
+import { buildFigureProvenance, preprocessingLabel } from '../visualization/provenance';
 import { alignWaveformTimes } from '../visualization/waveformGroups';
 
 export type JournalTimeHistoryQuantity = 'acceleration' | 'velocity' | 'displacement';
@@ -24,6 +32,7 @@ interface StackedTimeHistoryFigureProps {
   unit: string;
   fileNameBase: string;
   contextLabel?: string;
+  preprocessSettings?: PreprocessSettings;
 }
 
 interface PeakValue {
@@ -41,7 +50,7 @@ const PANEL_GAP = 27;
 const BOTTOM = 66;
 
 const AXIS_FONT = pointsToUserUnits(JOURNAL_AXIS_FONT_PT, WIDTH, PRINT_WIDTH_MM);
-const SMALL_FONT = pointsToUserUnits(7, WIDTH, PRINT_WIDTH_MM);
+const SMALL_FONT = pointsToUserUnits(JOURNAL_SUPPORT_FONT_PT, WIDTH, PRINT_WIDTH_MM);
 const PANEL_FONT = pointsToUserUnits(JOURNAL_PANEL_FONT_PT, WIDTH, PRINT_WIDTH_MM);
 const DATA_LINE = pointsToUserUnits(JOURNAL_DATA_LINE_PT, WIDTH, PRINT_WIDTH_MM);
 const AXIS_LINE = pointsToUserUnits(0.7, WIDTH, PRINT_WIDTH_MM);
@@ -60,14 +69,6 @@ function peakValue(times: readonly number[], values: readonly number[]): PeakVal
     }
   }
   return { magnitude, time };
-}
-
-function niceCeil(value: number): number {
-  if (!Number.isFinite(value) || value <= 0) return 1;
-  const power = 10 ** Math.floor(Math.log10(value));
-  const normalized = value / power;
-  const factor = normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10;
-  return factor * power;
 }
 
 function linearTicks(min: number, max: number, count = 6): number[] {
@@ -92,6 +93,16 @@ function panelLetter(index: number): string {
   return `(${String.fromCharCode(97 + (index % 26))})`;
 }
 
+function formatSignificant(value: number, significantDigits = 3): string {
+  if (!Number.isFinite(value)) return '';
+  return Number(value.toPrecision(significantDigits)).toString();
+}
+
+function sampleTimeDigits(dt: number): number {
+  if (!Number.isFinite(dt) || dt <= 0) return 2;
+  return Math.min(6, Math.max(0, Math.ceil(-Math.log10(dt))));
+}
+
 export function StackedTimeHistoryFigure({
   waveforms,
   quantity,
@@ -100,6 +111,7 @@ export function StackedTimeHistoryFigure({
   unit,
   fileNameBase,
   contextLabel,
+  preprocessSettings,
 }: StackedTimeHistoryFigureProps): JSX.Element {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const [grayscale, setGrayscale] = useState(false);
@@ -123,11 +135,43 @@ export function StackedTimeHistoryFigure({
   });
   if (!Number.isFinite(timeMin) || !Number.isFinite(timeMax)) [timeMin, timeMax] = [0, 1];
   if (timeMin === timeMax) timeMax = timeMin + 1;
-  const amplitudeLimit = niceCeil(Math.max(absoluteMaximum, 1e-12));
+  const amplitudeLimit = publicationSymmetricLimit(Math.max(absoluteMaximum, 1e-12));
   const timeDomain: [number, number] = [timeMin, timeMax];
   const amplitudeDomain: [number, number] = [-amplitudeLimit, amplitudeLimit];
   const xTicks = linearTicks(timeMin, timeMax, 6);
   const baseName = safeFileName(fileNameBase);
+  const effectivePreprocessSettings = preprocessSettings
+    ?? waveforms.find((waveform) => waveform.preprocessing)?.preprocessing;
+  const preprocessing = effectivePreprocessSettings ? preprocessingLabel(effectivePreprocessSettings) : undefined;
+  const figureContext = buildPublicationFigureContext(waveforms, preprocessing);
+  const provenance = buildFigureProvenance(waveforms, effectivePreprocessSettings);
+  const peaks = waveforms.map((waveform) => {
+    const times = alignment.values.get(waveform.sourceRecordId) ?? waveform.time;
+    const peak = peakValue(times, waveform[quantity]);
+    return {
+      component: waveform.componentLabel,
+      magnitude: peak.magnitude,
+      occurrenceTimeSeconds: peak.time,
+    };
+  });
+  const caption = `Stacked components use one symmetric ordinate with 10\u201315% headroom and direct peak labels; no figure title or separate legend is embedded in the artwork. Time reference: ${alignment.reference}. ${publicationContextCaption(figureContext)}`;
+  const exportMetadata = {
+    schema: 'strong-motion-stacked-time-history/1.0',
+    figureType: 'stacked-time-history',
+    quantity,
+    unit,
+    finalWidthMm: PRINT_WIDTH_MM,
+    rasterDpi: JOURNAL_LINE_ART_DPI,
+    timeReference: alignment.reference,
+    sharedOrdinate: amplitudeDomain,
+    sourceFiles: waveforms.map((waveform) => waveform.fileName),
+    stations: figureContext.stations,
+    events: figureContext.events,
+    preprocessing: figureContext.preprocessing,
+    peaks,
+    caption,
+    provenance,
+  };
 
   return (
     <figure className={`chart-card publication-figure journal-figure${grayscale ? ' grayscale-preview' : ''}`} tabIndex={0} aria-label={`${label} stacked journal figure`}>
@@ -135,7 +179,7 @@ export function StackedTimeHistoryFigure({
         <div className="figure-toolbar-label">
           <span className="figure-kicker">Journal line-art figure</span>
           <strong>{label}{contextLabel ? ` · ${contextLabel}` : ''}</strong>
-          <span className="note">180 mm · 800 dpi · final text 7–12 pt · shared ordinate</span>
+          <span className="note">180 mm · 800 dpi · 10 pt axes / 8 pt support · shared ordinate</span>
         </div>
         <div className="button-row compact">
           <button type="button" className="secondary" aria-pressed={grayscale} onClick={() => setGrayscale((value) => !value)}>
@@ -143,8 +187,10 @@ export function StackedTimeHistoryFigure({
           </button>
           <button type="button" className="secondary" onClick={() => svgRef.current && downloadSvg(svgRef.current, `${baseName}.svg`, { widthMm: PRINT_WIDTH_MM })}>SVG · vector</button>
           <button type="button" className="secondary" onClick={() => svgRef.current && void downloadPng(svgRef.current, `${baseName}.png`, { widthMm: PRINT_WIDTH_MM, dpi: JOURNAL_LINE_ART_DPI })}>PNG · 800 dpi</button>
+          <button type="button" className="secondary" onClick={() => downloadFigureMetadata(baseName, exportMetadata)}>Methods · JSON</button>
         </div>
       </div>
+      <span className="mobile-scroll-hint" aria-hidden="true">Swipe horizontally to inspect the full figure →</span>
       <svg
         ref={svgRef}
         className="publication-chart journal-chart"
@@ -156,18 +202,9 @@ export function StackedTimeHistoryFigure({
         preserveAspectRatio="xMidYMid meet"
         style={{ fontFamily: 'Arial, Helvetica, sans-serif' }}
       >
-        <title id={`${baseName}-title`}>{label} time histories</title>
-        <desc id={`${baseName}-description`}>{waveforms.length} vertically stacked time histories on a shared ordinate. {alignment.reference}.</desc>
-        <metadata>{JSON.stringify({
-          figureType: 'stacked-time-history',
-          quantity,
-          unit,
-          finalWidthMm: PRINT_WIDTH_MM,
-          rasterDpi: JOURNAL_LINE_ART_DPI,
-          timeReference: alignment.reference,
-          sharedOrdinate: amplitudeDomain,
-          sourceFiles: waveforms.map((waveform) => waveform.fileName),
-        })}</metadata>
+        <title id={`${baseName}-title`}>{`${label} time histories`}</title>
+        <desc id={`${baseName}-description`}>{waveforms.length} vertically stacked time histories on a shared ordinate. {alignment.reference}. {publicationContextCaption(figureContext)}</desc>
+        <metadata>{JSON.stringify(exportMetadata)}</metadata>
         <rect width={WIDTH} height={height} fill="#ffffff" />
 
         {waveforms.map((waveform, panelIndex) => {
@@ -207,7 +244,7 @@ export function StackedTimeHistoryFigure({
                 {panelLetter(panelIndex)} {waveformSeriesLabel(waveform)}
               </text>
               <text x={LEFT + plotWidth} y={panelTop - 8} textAnchor="end" fontSize={SMALL_FONT} fill="#36414a">
-                {shortLabel} = {formatNumber(peak.magnitude, 5)} {unit} at {formatNumber(peak.time, 4)} s
+                {shortLabel} = {formatSignificant(peak.magnitude)} {unit} at {formatNumber(peak.time, sampleTimeDigits(waveform.dt))} s
               </text>
 
               {panelIndex === waveforms.length - 1 && xTicks.map((tick) => {
@@ -229,7 +266,7 @@ export function StackedTimeHistoryFigure({
         <text x={LEFT + plotWidth / 2} y={height - 18} textAnchor="middle" fontSize={AXIS_FONT} fontWeight="700" fill="#111820">Time [s]</text>
       </svg>
       <figcaption className="chart-caption journal-caption">
-        Stacked components use one ordinate and direct labels; no figure title or legend is embedded in the artwork. Time reference: {alignment.reference}.
+        {caption}
       </figcaption>
     </figure>
   );

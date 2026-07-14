@@ -22,8 +22,9 @@ export const JOURNAL_FIGURE_PRESETS: Readonly<Record<JournalWidthPreset, Journal
 };
 
 export const JOURNAL_LINE_ART_DPI = 800;
-export const JOURNAL_MIN_FONT_PT = 6;
-export const JOURNAL_AXIS_FONT_PT = 8;
+export const JOURNAL_MIN_FONT_PT = 7;
+export const JOURNAL_AXIS_FONT_PT = 10;
+export const JOURNAL_SUPPORT_FONT_PT = 8;
 export const JOURNAL_PANEL_FONT_PT = 12;
 export const JOURNAL_MIN_LINE_PT = 0.5;
 export const JOURNAL_DATA_LINE_PT = 0.8;

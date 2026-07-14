@@ -45,17 +45,22 @@ https://sugiyamamitsuki.github.io/strong-motion-web-viewer/
   - Different sampling intervals are resampled onto a shared time grid
   - Square plots with equal X/Y scale
 - Fourier amplitude spectra
-  - Logarithmic axes with a journal default spanning four decades below the peak
-  - Optional full-positive range for numerical-floor inspection
-  - Uses the conditioned waveform directly without applying a second hidden frequency taper
+  - Konno–Ohmachi-smoothed journal curve (`b = 40` by default; `20/40/60` selectable) with the raw FFT retained as a faint 0.5 pt diagnostic trace
+  - Raw / smoothed / combined views and an explicit 5% cosine or rectangular time-window choice
+  - A shared frequency band derived from record length, Nyquist frequency, and the active high-pass / low-pass preprocessing
+  - Event/station/channel record-set selection prevents unrelated spectra or duplicate component styles from being overlaid
+  - Caption, embedded SVG metadata, and Methods JSON record the window, `|DFT|Δt` normalization, one-sided convention, `df`, `1/T`, smoothing, data identity, and preprocessing
 - Morlet wavelet scalograms
   - Continuous wavelet transform with Morlet wavelet `omega0 = 8`
   - Frequency or period Y-axis display
-  - Fast / Standard / Detailed resolution options for browser-side calculation
-  - Perceptually uniform Viridis colour scale with explicit 5th–98th percentile limits
+  - Fast / Standard / Detailed / Publication resolution options with 48 / 96 / 128 / 160 logarithmic frequencies
+  - Perceptually uniform Viridis colour scale with a fixed shared dB range for controlled comparisons
+  - Optional record-specific 5th–98th percentile range, explicitly marked as not comparable across records
   - Hatched Morlet cone-of-influence mask for edge-effect interpretation
+  - Kaiser-windowed sinc anti-alias resampling before CWT computation when a long record exceeds the browser-side sample cap
+  - Optional descriptive maximum-magnitude ridge restricted to the cone of influence and displayed colour floor
   - L2-normalized coefficients are labelled with their dimensional unit (`input unit · √s`)
-  - 180 mm SVG working export and 800 dpi PNG mixed-artwork export
+  - 180 mm SVG, 800 dpi PNG, and Methods JSON exports with exact colour/CWT settings and data provenance
 - Horizontal-to-vertical spectral ratio
   - Station/channel sets are separated by event identity so different earthquakes are never combined
   - Default horizontal combination follows the SESAME-style geometric mean: H/V = `sqrt(NS * EW) / UD`
@@ -75,6 +80,9 @@ https://sugiyamamitsuki.github.io/strong-motion-web-viewer/
   - Sd / pSv / Sa views
   - Switchable log-log 1:1 view and fitted data-range view
   - Tripartite spectrum background for pSv in log-log 1:1 mode
+  - Event/station/channel record-set selection; unrelated earthquakes are never combined in one response figure
+  - Automatic removal of 1:1/tripartite guides when equal-decade geometry would require displaying uncomputed periods
+  - In-figure damping, per-component peak period/value annotations, finite computed-period axes, manuscript caption, and reproducibility metadata
 - JMA seismic intensity
   - Calculated when NS/EW/UD three-component data are available
   - JMA seismic intensity filter is applied in the FFT domain
@@ -96,9 +104,11 @@ https://sugiyamamitsuki.github.io/strong-motion-web-viewer/
   - Source editing is disabled when multiple events are loaded to prevent an accidental global overwrite
 - Journal figures
   - Compact 180 mm manuscript plate combining stacked acceleration histories and the selected-damping Sa spectrum
-  - Final-size 7–12 pt typography, 0.5 pt minimum guides, 0.8 pt data traces, and lowercase panel labels
+  - Final-size 10 pt axes, 8 pt supporting text, 12 pt panel labels, 0.5 pt minimum guides, and 0.8 pt data traces
+  - Approximately 60:40 waveform/response layout, 10–15% waveform headroom, and PGA / response-peak annotations
   - Titles and explanatory captions stay outside the SVG artwork
   - Grayscale preview; colour series also use independent dash patterns
+  - Explicit horizontal-swipe cue on narrow screens while the page body remains fixed to the viewport
   - 800 dpi PNG export with physical-resolution metadata and editable SVG working export
 - Report overview figure
   - Combines record metadata, latitude/longitude, distances, ground motion strength, stacked acceleration/velocity waveforms, and tripartite response spectrum in a separate A4 analysis-overview figure
@@ -108,6 +118,7 @@ https://sugiyamamitsuki.github.io/strong-motion-web-viewer/
 - Figure export
   - SVG working files with 180 mm physical dimensions, inlined presentation styles, and embedded method metadata
   - 180 mm-wide 800 dpi PNG for journal charts and 210 mm-wide 300 dpi PNG for the separate A4 overview report
+  - Figure-specific Methods JSON with source records, station/event context, exact preprocessing and analysis settings, app version, and build revision
   - Colourblind-safe component palette with independent dash patterns for greyscale reproduction
   - SVG uses system Arial/Helvetica fonts; convert text to outlines or embed fonts when preparing a journal's final PDF/EPS/TIFF submission file
 - Data export

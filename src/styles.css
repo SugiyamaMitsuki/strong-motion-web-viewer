@@ -307,6 +307,10 @@ button.danger:hover:not(:disabled) {
   font-size: 0.8rem;
 }
 
+.chart-toolbar .button-row {
+  flex-wrap: wrap;
+}
+
 .settings-panel {
   padding: 0;
 }
@@ -614,6 +618,10 @@ td.numeric {
   break-inside: avoid;
 }
 
+.mobile-scroll-hint {
+  display: none;
+}
+
 .journal-figure {
   border-color: #b8c0c6;
   border-radius: 4px;
@@ -686,6 +694,16 @@ td.numeric {
   fill: #34444f;
   font-size: var(--journal-supplemental-font, 11px);
   font-weight: 600;
+}
+
+.chart-corner-note {
+  fill: #25343d;
+  font-size: var(--journal-supplemental-font, 11px);
+  font-weight: 700;
+  paint-order: stroke;
+  stroke: #ffffff;
+  stroke-width: 4px;
+  stroke-linejoin: round;
 }
 
 .grid-line {
@@ -1262,11 +1280,34 @@ td.numeric {
   }
 
   .chart-caption {
-    display: none;
+    position: sticky;
+    left: 0;
+    display: block;
+    box-sizing: border-box;
+    width: min(100%, 680px);
+    padding: 8px 12px 10px;
+    font-size: 0.68rem;
+    line-height: 1.45;
   }
 
   .publication-figure {
     overflow-x: auto;
+  }
+
+  .mobile-scroll-hint {
+    position: sticky;
+    z-index: 2;
+    left: 0;
+    display: block;
+    box-sizing: border-box;
+    width: min(100%, 680px);
+    border-bottom: 1px solid #d5dde2;
+    background: #eef5f8;
+    color: #405663;
+    padding: 5px 12px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.01em;
   }
 
   .publication-figure .publication-chart {
@@ -1319,5 +1360,9 @@ td.numeric {
 
   .publication-chart {
     max-height: 255mm;
+  }
+
+  .mobile-scroll-hint {
+    display: none !important;
   }
 }

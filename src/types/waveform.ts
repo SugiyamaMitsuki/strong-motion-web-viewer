@@ -52,6 +52,8 @@ export interface DerivedWaveform {
   velocity: number[];
   displacement: number[];
   metadata: WaveformMetadata;
+  /** Exact viewer preprocessing used to produce this derived waveform. */
+  preprocessing?: PreprocessSettings;
 }
 
 export interface CsvParseOptions {

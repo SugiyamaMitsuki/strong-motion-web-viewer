@@ -1,7 +1,8 @@
 import { useMemo, useRef, useState } from 'react';
 import { computeResponseSpectra } from '../analysis/responseSpectrum';
+import { downloadFigureMetadata } from '../export/figureMetadata';
 import { downloadPng, downloadSvg } from '../export/exportImage';
-import type { DerivedWaveform, ResponseSpectrumSettings } from '../types/waveform';
+import type { DerivedWaveform, PreprocessSettings, ResponseSpectrumSettings } from '../types/waveform';
 import { formatNumber, safeFileName } from '../utils/file';
 import { componentSeriesStyle } from '../visualization/chartStyle';
 import { downsampleSegments } from '../visualization/downsample';
@@ -11,13 +12,21 @@ import {
   JOURNAL_LINE_ART_DPI,
   JOURNAL_MIN_LINE_PT,
   JOURNAL_PANEL_FONT_PT,
+  JOURNAL_SUPPORT_FONT_PT,
   pointsToUserUnits,
 } from '../visualization/journal';
+import {
+  buildPublicationFigureContext,
+  publicationContextCaption,
+  publicationSymmetricLimit,
+} from '../visualization/publicationContext';
+import { buildFigureProvenance, preprocessingLabel } from '../visualization/provenance';
 import { alignWaveformTimes, buildWaveformRecordSets } from '../visualization/waveformGroups';
 
 interface JournalPlatePanelProps {
   waveforms: DerivedWaveform[];
   responseSettings: ResponseSpectrumSettings;
+  preprocessSettings?: PreprocessSettings;
 }
 
 interface Rect {
@@ -31,22 +40,19 @@ const WIDTH = 1120;
 const HEIGHT = 700;
 const PRINT_WIDTH_MM = 180;
 const AXIS_FONT = pointsToUserUnits(JOURNAL_AXIS_FONT_PT, WIDTH, PRINT_WIDTH_MM);
-const SMALL_FONT = pointsToUserUnits(7, WIDTH, PRINT_WIDTH_MM);
+const SMALL_FONT = pointsToUserUnits(JOURNAL_SUPPORT_FONT_PT, WIDTH, PRINT_WIDTH_MM);
 const PANEL_FONT = pointsToUserUnits(JOURNAL_PANEL_FONT_PT, WIDTH, PRINT_WIDTH_MM);
 const DATA_LINE = pointsToUserUnits(JOURNAL_DATA_LINE_PT, WIDTH, PRINT_WIDTH_MM);
 const AXIS_LINE = pointsToUserUnits(0.7, WIDTH, PRINT_WIDTH_MM);
 const GUIDE_LINE = pointsToUserUnits(JOURNAL_MIN_LINE_PT, WIDTH, PRINT_WIDTH_MM);
 
-const WAVEFORM_RECT: Rect = { x: 96, y: 58, width: 580, height: 560 };
-const SPECTRUM_RECT: Rect = { x: 760, y: 86, width: 340, height: 480 };
-
-function niceCeil(value: number): number {
-  if (!Number.isFinite(value) || value <= 0) return 1;
-  const power = 10 ** Math.floor(Math.log10(value));
-  const normalized = value / power;
-  const multiplier = normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10;
-  return multiplier * power;
-}
+// Plot widths are 560:374 (59.96:40.04), leaving a separate gutter for the
+// response ordinate without sacrificing the requested journal-plate balance.
+const WAVEFORM_RECT: Rect = { x: 90, y: 58, width: 560, height: 560 };
+const SPECTRUM_LEGEND_Y = 48;
+const SPECTRUM_LEGEND_ROW_GAP = 24;
+const SPECTRUM_LEGEND_BOTTOM = SPECTRUM_LEGEND_Y + SPECTRUM_LEGEND_ROW_GAP * 2 + SMALL_FONT;
+const SPECTRUM_RECT: Rect = { x: 716, y: 124, width: 374, height: 442 };
 
 function niceTicks(min: number, max: number, targetCount = 6): number[] {
   if (!Number.isFinite(min) || !Number.isFinite(max) || max <= min) return [];
@@ -134,7 +140,22 @@ function spectrumPath(
   return parts.join(' ');
 }
 
-export function JournalPlatePanel({ waveforms, responseSettings }: JournalPlatePanelProps): JSX.Element {
+function peakCoordinate(x: readonly number[], y: readonly number[]): { x: number; y: number } | undefined {
+  let peak: { x: number; y: number } | undefined;
+  const count = Math.min(x.length, y.length);
+  for (let index = 0; index < count; index += 1) {
+    if (!Number.isFinite(x[index]) || !Number.isFinite(y[index])) continue;
+    if (!peak || Math.abs(y[index]) > Math.abs(peak.y)) peak = { x: x[index], y: y[index] };
+  }
+  return peak;
+}
+
+function formatSignificant(value: number, significantDigits = 3): string {
+  if (!Number.isFinite(value)) return '';
+  return value.toPrecision(significantDigits);
+}
+
+export function JournalPlatePanel({ waveforms, responseSettings, preprocessSettings }: JournalPlatePanelProps): JSX.Element {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const [recordSetId, setRecordSetId] = useState('');
   const [grayscale, setGrayscale] = useState(false);
@@ -147,6 +168,17 @@ export function JournalPlatePanel({ waveforms, responseSettings }: JournalPlateP
   const spectra = useMemo(
     () => computeResponseSpectra(selectedWaveforms, responseSettings),
     [selectedWaveforms, responseSettings],
+  );
+  const effectivePreprocessSettings = preprocessSettings
+    ?? selectedWaveforms.find((waveform) => waveform.preprocessing)?.preprocessing;
+  const preprocessing = effectivePreprocessSettings ? preprocessingLabel(effectivePreprocessSettings) : undefined;
+  const figureContext = useMemo(
+    () => buildPublicationFigureContext(selectedWaveforms, preprocessing),
+    [preprocessing, selectedWaveforms],
+  );
+  const provenance = useMemo(
+    () => buildFigureProvenance(selectedWaveforms, effectivePreprocessSettings),
+    [effectivePreprocessSettings, selectedWaveforms],
   );
 
   if (!selected || selectedWaveforms.length === 0) return <p className="empty-state">No data is available for a journal composite figure.</p>;
@@ -166,7 +198,7 @@ export function JournalPlatePanel({ waveforms, responseSettings }: JournalPlateP
   });
   if (!Number.isFinite(timeMin) || !Number.isFinite(timeMax)) [timeMin, timeMax] = [0, 1];
   if (timeMin === timeMax) timeMax = timeMin + 1;
-  const amplitude = niceCeil(Math.max(accelerationMax, 1e-12));
+  const amplitude = publicationSymmetricLimit(Math.max(accelerationMax, 1e-12));
   const timeDomain: [number, number] = [timeMin, timeMax];
   const waveformRows = selectedWaveforms.length;
   const waveformGap = 24;
@@ -178,15 +210,67 @@ export function JournalPlatePanel({ waveforms, responseSettings }: JournalPlateP
     .map((point) => point.period));
   const computedPeriodMin = Math.min(...finitePeriods);
   const computedPeriodMax = Math.max(...finitePeriods);
-  const periodDomain: [number, number] = Number.isFinite(computedPeriodMin) && computedPeriodMax > computedPeriodMin
+  const computedPeriodRange: [number, number] | undefined = Number.isFinite(computedPeriodMin)
     ? [computedPeriodMin, computedPeriodMax]
-    : [0.02, 10];
+    : undefined;
+  const hasPlottableResponseRange = Boolean(computedPeriodRange && computedPeriodRange[1] > computedPeriodRange[0]);
+  const requestedPeriodMin = Number.isFinite(responseSettings.minPeriod) && responseSettings.minPeriod > 0
+    ? responseSettings.minPeriod
+    : 0.02;
+  const requestedPeriodMax = Number.isFinite(responseSettings.maxPeriod) && responseSettings.maxPeriod > requestedPeriodMin
+    ? responseSettings.maxPeriod
+    : requestedPeriodMin * 10;
+  const periodDomain: [number, number] = hasPlottableResponseRange
+    ? computedPeriodRange as [number, number]
+    : [requestedPeriodMin, requestedPeriodMax];
   let responseMax = 0;
   spectra.forEach((spectrum) => spectrum.points.forEach((point) => { if (Number.isFinite(point.psa)) responseMax = Math.max(responseMax, point.psa); }));
-  const responseDomain: [number, number] = [0, niceCeil(Math.max(responseMax * 1.05, 1))];
+  const responseDomain: [number, number] = hasPlottableResponseRange
+    ? [0, publicationSymmetricLimit(Math.max(responseMax, 1e-12))]
+    : [0, 1];
   const spectrumPeriodTicks = periodTicks(periodDomain);
-  const responseTicks = niceTicks(0, responseDomain[1], 6);
+  const responseTicks = hasPlottableResponseRange ? niceTicks(0, responseDomain[1], 6) : [];
+  const spectrumPeaks = spectra.map((spectrum) => peakCoordinate(
+    spectrum.points.map((point) => point.period),
+    spectrum.points.map((point) => point.psa),
+  ));
   const fileNameBase = safeFileName(`journal_plate_${selected.label}`);
+  const responseStatus = hasPlottableResponseRange
+    ? `Computed response period range: T = ${formatNumber(computedPeriodRange![0], 4)}–${formatNumber(computedPeriodRange![1], 4)} s.`
+    : computedPeriodRange
+      ? `Only one finite response ordinate was computed at T = ${formatNumber(computedPeriodRange[0], 4)} s; panel (b) has no plottable range.`
+      : `No finite response ordinates were computed for requested T = ${formatNumber(requestedPeriodMin, 4)}–${formatNumber(requestedPeriodMax, 4)} s; panel (b) is empty.`;
+  const caption = `Compact manuscript plate with a 60:40 waveform-to-response balance. Stacked components share a symmetric ordinate with 10\u201315% headroom; spectra use a logarithmic period axis and mark each component peak. ${publicationContextCaption(figureContext)} Response spectra use the Nigam–Jennings linear-SDOF exact recurrence with linearly interpolated acceleration and h = ${(responseSettings.dampingRatio * 100).toFixed(1)}%. ${responseStatus}`;
+  const exportMetadata = {
+    schema: 'strong-motion-journal-plate/1.0',
+    figureType: 'waveform-response-composite',
+    recordSet: selected.label,
+    sourceFiles: selectedWaveforms.map((waveform) => waveform.fileName),
+    finalWidthMm: PRINT_WIDTH_MM,
+    rasterDpi: JOURNAL_LINE_ART_DPI,
+    dampingRatio: responseSettings.dampingRatio,
+    sharedWaveformOrdinate: [-amplitude, amplitude],
+    timeReference: alignment.reference,
+    panelWidthRatio: { waveform: 0.6, response: 0.4 },
+    stations: figureContext.stations,
+    events: figureContext.events,
+    preprocessing: figureContext.preprocessing,
+    responseCalculation: {
+      method: 'Nigam–Jennings linear-SDOF exact recurrence for linearly interpolated acceleration with adaptive substepping and free-vibration tail',
+      requestedPeriodRangeSeconds: [responseSettings.minPeriod, responseSettings.maxPeriod],
+      computedPeriodRangeSeconds: computedPeriodRange ?? null,
+      displayPeriodRangeSeconds: periodDomain,
+      status: hasPlottableResponseRange ? 'computed' : computedPeriodRange ? 'single-finite-ordinate' : 'no-finite-response',
+      periodCount: responseSettings.periodCount,
+    },
+    responsePeaks: spectra.map((spectrum, index) => ({
+      component: spectrum.componentLabel,
+      periodSeconds: spectrumPeaks[index]?.x,
+      saGal: spectrumPeaks[index]?.y,
+    })),
+    caption,
+    provenance,
+  };
 
   return (
     <div className="chart-stack">
@@ -214,9 +298,11 @@ export function JournalPlatePanel({ waveforms, responseSettings }: JournalPlateP
             <button type="button" className="secondary" aria-pressed={grayscale} onClick={() => setGrayscale((value) => !value)}>{grayscale ? 'Colour preview' : 'Grayscale check'}</button>
             <button type="button" className="secondary" onClick={() => svgRef.current && downloadSvg(svgRef.current, `${fileNameBase}.svg`, { widthMm: PRINT_WIDTH_MM })}>SVG · vector</button>
             <button type="button" className="secondary" onClick={() => svgRef.current && void downloadPng(svgRef.current, `${fileNameBase}.png`, { widthMm: PRINT_WIDTH_MM, dpi: JOURNAL_LINE_ART_DPI })}>PNG · 800 dpi</button>
+            <button type="button" className="secondary" onClick={() => downloadFigureMetadata(fileNameBase, exportMetadata)}>Methods · JSON</button>
           </div>
         </div>
 
+        <span className="mobile-scroll-hint" aria-hidden="true">Swipe horizontally to inspect panel (b) →</span>
         <svg
           ref={svgRef}
           className="publication-chart journal-chart"
@@ -228,22 +314,14 @@ export function JournalPlatePanel({ waveforms, responseSettings }: JournalPlateP
           preserveAspectRatio="xMidYMid meet"
           style={{ fontFamily: 'Arial, Helvetica, sans-serif' }}
         >
-          <title id="journal-plate-title">Acceleration time histories and response spectrum for {selected.label}</title>
-          <desc id="journal-plate-description">Panel a contains stacked acceleration components on a shared ordinate. Panel b contains {(responseSettings.dampingRatio * 100).toFixed(1)}-percent-damped acceleration response spectra.</desc>
-          <metadata>{JSON.stringify({
-            figureType: 'waveform-response-composite',
-            recordSet: selected.label,
-            sourceFiles: selectedWaveforms.map((waveform) => waveform.fileName),
-            finalWidthMm: PRINT_WIDTH_MM,
-            rasterDpi: JOURNAL_LINE_ART_DPI,
-            dampingRatio: responseSettings.dampingRatio,
-            sharedWaveformOrdinate: [-amplitude, amplitude],
-            timeReference: alignment.reference,
-          })}</metadata>
+          <title id="journal-plate-title">{`Acceleration time histories and response spectrum for ${selected.label}`}</title>
+          <desc id="journal-plate-description">Panel a contains stacked acceleration components on a shared ordinate with component PGA and occurrence time. Panel b contains {(responseSettings.dampingRatio * 100).toFixed(1)}-percent-damped acceleration response spectra with component peak periods and values. {publicationContextCaption(figureContext)}</desc>
+          <metadata>{JSON.stringify(exportMetadata)}</metadata>
           <rect width={WIDTH} height={HEIGHT} fill="#ffffff" />
 
           <text x={WAVEFORM_RECT.x} y="29" fontSize={PANEL_FONT} fontWeight="700" fill="#111820">(a)</text>
-          <text x={SPECTRUM_RECT.x} y="57" fontSize={PANEL_FONT} fontWeight="700" fill="#111820">(b)</text>
+          <text x={SPECTRUM_RECT.x} y="29" fontSize={PANEL_FONT} fontWeight="700" fill="#111820">(b)</text>
+          <text x={SPECTRUM_RECT.x + SPECTRUM_RECT.width} y="29" textAnchor="end" fontSize={SMALL_FONT} fill="#1f2933">h = {(responseSettings.dampingRatio * 100).toFixed(1)}%</text>
 
           {selectedWaveforms.map((waveform, index) => {
             const times = alignment.values.get(waveform.sourceRecordId) ?? waveform.time;
@@ -254,6 +332,7 @@ export function JournalPlatePanel({ waveforms, responseSettings }: JournalPlateP
               height: waveformHeight,
             };
             const zeroY = rect.y + rect.height / 2;
+            const peak = peakCoordinate(times, waveform.acceleration);
             return (
               <g key={waveform.sourceRecordId}>
                 <line x1={rect.x} y1={rect.y} x2={rect.x + rect.width} y2={rect.y} stroke="#a1a8ad" strokeWidth={GUIDE_LINE} />
@@ -262,6 +341,11 @@ export function JournalPlatePanel({ waveforms, responseSettings }: JournalPlateP
                 <line x1={rect.x} y1={rect.y} x2={rect.x} y2={rect.y + rect.height} stroke="#111820" strokeWidth={AXIS_LINE} />
                 <path d={timePath(times, waveform.acceleration, rect, timeDomain, amplitude)} fill="none" stroke="#111820" strokeWidth={DATA_LINE} strokeLinecap="round" strokeLinejoin="round" />
                 <text x={rect.x + 7} y={rect.y + SMALL_FONT + 3} fontSize={SMALL_FONT} fontWeight="700" fill="#111820">{waveform.componentLabel}</text>
+                {peak && (
+                  <text x={rect.x + rect.width - 5} y={rect.y + SMALL_FONT + 3} textAnchor="end" fontSize={SMALL_FONT} fill="#4b5563">
+                    PGA = {formatSignificant(Math.abs(peak.y))} cm/s² at t = {formatNumber(peak.x, 2)} s
+                  </text>
+                )}
                 {[amplitude, 0, -amplitude].map((tick) => {
                   const y = scaleLinear(tick, [-amplitude, amplitude], [rect.y + rect.height, rect.y]);
                   return (
@@ -307,38 +391,63 @@ export function JournalPlatePanel({ waveforms, responseSettings }: JournalPlateP
           })}
           <line x1={SPECTRUM_RECT.x} y1={SPECTRUM_RECT.y} x2={SPECTRUM_RECT.x} y2={SPECTRUM_RECT.y + SPECTRUM_RECT.height} stroke="#111820" strokeWidth={AXIS_LINE} />
           <line x1={SPECTRUM_RECT.x} y1={SPECTRUM_RECT.y + SPECTRUM_RECT.height} x2={SPECTRUM_RECT.x + SPECTRUM_RECT.width} y2={SPECTRUM_RECT.y + SPECTRUM_RECT.height} stroke="#111820" strokeWidth={AXIS_LINE} />
+          {!hasPlottableResponseRange && (
+            <text x={SPECTRUM_RECT.x + SPECTRUM_RECT.width / 2} y={SPECTRUM_RECT.y + SPECTRUM_RECT.height / 2} textAnchor="middle" fontSize={SMALL_FONT} fill="#4b5563">
+              No plottable finite response range
+            </text>
+          )}
           {spectra.map((spectrum, index) => {
             const style = componentSeriesStyle(spectrum.component, index);
+            const peak = spectrumPeaks[index];
             return (
-              <path
-                key={`${spectrum.componentLabel}-${index}`}
-                d={spectrumPath(spectrum.points.map((point) => point.period), spectrum.points.map((point) => point.psa), periodDomain, responseDomain)}
-                fill="none"
-                stroke={style.color}
-                strokeWidth={DATA_LINE * 1.15}
-                strokeDasharray={style.dashArray}
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
+              <g key={`${spectrum.componentLabel}-${index}`}>
+                <path
+                  d={spectrumPath(spectrum.points.map((point) => point.period), spectrum.points.map((point) => point.psa), periodDomain, responseDomain)}
+                  fill="none"
+                  stroke={style.color}
+                  strokeWidth={DATA_LINE * 1.15}
+                  strokeDasharray={style.dashArray}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+                {peak && (
+                  <circle
+                    cx={scaleLog(peak.x, periodDomain, [SPECTRUM_RECT.x, SPECTRUM_RECT.x + SPECTRUM_RECT.width])}
+                    cy={scaleLinear(peak.y, responseDomain, [SPECTRUM_RECT.y + SPECTRUM_RECT.height, SPECTRUM_RECT.y])}
+                    r="4"
+                    fill="#ffffff"
+                    stroke={style.color}
+                    strokeWidth={AXIS_LINE * 1.25}
+                  />
+                )}
+              </g>
             );
           })}
           <text x={SPECTRUM_RECT.x + SPECTRUM_RECT.width / 2} y={SPECTRUM_RECT.y + SPECTRUM_RECT.height + 55} textAnchor="middle" fontSize={AXIS_FONT} fontWeight="700" fill="#111820">Period [s]</text>
-          <text x={SPECTRUM_RECT.x - 64} y={SPECTRUM_RECT.y + SPECTRUM_RECT.height / 2} textAnchor="middle" fontSize={AXIS_FONT} fontWeight="700" fill="#111820" transform={`rotate(-90 ${SPECTRUM_RECT.x - 64} ${SPECTRUM_RECT.y + SPECTRUM_RECT.height / 2})`}>Sa [cm/s²]</text>
-          <text x={SPECTRUM_RECT.x + SPECTRUM_RECT.width - 3} y={SPECTRUM_RECT.y + 17} textAnchor="end" fontSize={SMALL_FONT} fill="#1f2933">h = {(responseSettings.dampingRatio * 100).toFixed(1)}%</text>
-          <g transform={`translate(${SPECTRUM_RECT.x + 12} ${SPECTRUM_RECT.y + 24})`}>
+          <text x={SPECTRUM_RECT.x - 50} y={SPECTRUM_RECT.y + SPECTRUM_RECT.height / 2} textAnchor="middle" fontSize={AXIS_FONT} fontWeight="700" fill="#111820" transform={`rotate(-90 ${SPECTRUM_RECT.x - 50} ${SPECTRUM_RECT.y + SPECTRUM_RECT.height / 2})`}>Sa [cm/s²]</text>
+          <g
+            aria-label="Response peak legend outside plot area"
+            data-response-legend-placement="outside-plot"
+            data-response-legend-bottom={SPECTRUM_LEGEND_BOTTOM}
+            data-response-plot-top={SPECTRUM_RECT.y}
+            transform={`translate(${SPECTRUM_RECT.x} ${SPECTRUM_LEGEND_Y})`}
+          >
             {spectra.map((spectrum, index) => {
               const style = componentSeriesStyle(spectrum.component, index);
+              const peak = spectrumPeaks[index];
               return (
-                <g key={`legend-${spectrum.componentLabel}-${index}`} transform={`translate(0 ${index * 24})`}>
+                <g key={`legend-${spectrum.componentLabel}-${index}`} transform={`translate(0 ${index * SPECTRUM_LEGEND_ROW_GAP})`}>
                   <line x1="0" y1="0" x2="29" y2="0" stroke={style.color} strokeWidth={DATA_LINE * 1.15} strokeDasharray={style.dashArray} />
-                  <text x="38" y={SMALL_FONT * 0.34} fontSize={SMALL_FONT} fontWeight="700" fill="#111820">{spectrum.componentLabel}</text>
+                  <text x="38" y={SMALL_FONT * 0.34} fontSize={SMALL_FONT} fontWeight="700" fill="#111820">
+                    {spectrum.componentLabel}{peak ? `: T = ${formatSignificant(peak.x)} s, Sa = ${formatSignificant(peak.y)}` : ': peak unavailable'}
+                  </text>
                 </g>
               );
             })}
           </g>
         </svg>
         <figcaption className="chart-caption journal-caption">
-          Compact manuscript plate: stacked components share one ordinate; spectra use a logarithmic period axis. The figure title and explanatory caption remain outside the artwork.
+          {caption}
         </figcaption>
       </figure>
     </div>

@@ -23,13 +23,23 @@
     "src/analysis/responseSpectrum.ts",
     "src/analysis/statistics.ts",
     "src/analysis/wavelet.ts",
+    "src/components/JournalPlatePanel.tsx",
+    "src/components/FourierPanel.tsx",
+    "src/components/ResponseSpectrumPanel.tsx",
+    "src/components/StackedTimeHistoryFigure.tsx",
+    "src/components/SvgChart.tsx",
     "src/parsers/jma.ts",
     "src/export/exportImage.ts",
+    "src/export/figureMetadata.ts",
     "src/utils/file.ts",
     "src/visualization/downsample.ts",
+    "src/visualization/chartStyle.ts",
     "src/visualization/journal.ts",
+    "src/visualization/labels.ts",
+    "src/visualization/publicationContext.ts",
     "src/visualization/waveformGroups.ts",
     "src/visualization/plotGeometry.ts",
+    "src/visualization/provenance.ts",
     "src/types/waveform.ts"
   ]
 }

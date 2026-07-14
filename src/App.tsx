@@ -342,8 +342,8 @@ export default function App(): JSX.Element {
                 {activeTab === 'fourier' && <FourierPanel waveforms={derivedWaveforms} />}
                 {activeTab === 'wavelet' && <WaveletPanel waveforms={derivedWaveforms} />}
                 {activeTab === 'hvsr' && <HorizontalVerticalRatioPanel waveforms={derivedWaveforms} />}
-                {activeTab === 'response' && <ResponseSpectrumPanel waveforms={derivedWaveforms} settings={settings.responseSpectrum} />}
-                {activeTab === 'journal' && <JournalPlatePanel waveforms={derivedWaveforms} responseSettings={settings.responseSpectrum} />}
+                {activeTab === 'response' && <ResponseSpectrumPanel waveforms={derivedWaveforms} settings={settings.responseSpectrum} preprocessSettings={settings.preprocess} />}
+                {activeTab === 'journal' && <JournalPlatePanel waveforms={derivedWaveforms} responseSettings={settings.responseSpectrum} preprocessSettings={settings.preprocess} />}
                 {activeTab === 'report' && <ReportFigurePanel waveforms={derivedWaveforms} jmaWaveforms={jmaWaveforms} peaks={peaks} responseSettings={settings.responseSpectrum} />}
                 {activeTab === 'export' && (
                   <ExportPanel

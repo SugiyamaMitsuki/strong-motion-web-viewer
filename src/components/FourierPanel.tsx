@@ -1,8 +1,17 @@
 import { useMemo, useState } from 'react';
-import { computeFourierSpectrum } from '../analysis/fourier';
-import type { DerivedWaveform, Quantity } from '../types/waveform';
+import {
+  computeFourierAnalysis,
+  smoothFourierSpectrumKonnoOhmachi,
+  type FourierAnalysisResult,
+} from '../analysis/fourier';
+import type { DerivedWaveform, FourierSpectrum, Quantity } from '../types/waveform';
 import { componentSeriesStyle } from '../visualization/chartStyle';
-import { waveformSeriesLabel } from '../visualization/labels';
+import {
+  buildFigureProvenance,
+  datasetLabel,
+  preprocessingLabel,
+} from '../visualization/provenance';
+import { buildWaveformRecordSets } from '../visualization/waveformGroups';
 import { SvgChart, type ChartSeries } from './SvgChart';
 
 interface FourierPanelProps {
@@ -10,6 +19,17 @@ interface FourierPanelProps {
 }
 
 type FourierYRange = 'journal' | 'full';
+type FourierDisplayMode = 'smoothed-raw' | 'smoothed' | 'raw';
+type FourierWindow = 'cosine-5' | 'rectangular';
+
+interface AnalysedWaveform {
+  waveform: DerivedWaveform;
+  label: string;
+  analysis: FourierAnalysisResult;
+}
+
+const RELATIVE_SUPPORT_FLOOR = 1e-12;
+const SMOOTHED_POINT_COUNT = 360;
 
 function quantityLabel(quantity: Quantity): string {
   if (quantity === 'acceleration') return 'Acceleration';
@@ -26,7 +46,100 @@ function unitForQuantity(quantity: Quantity): string {
 function fourierUnitForQuantity(quantity: Quantity): string {
   if (quantity === 'acceleration') return 'cm/s';
   if (quantity === 'velocity') return 'cm';
-  return 'cm s';
+  return 'cm·s';
+}
+
+function valuesForQuantity(waveform: DerivedWaveform, quantity: Quantity): number[] {
+  if (quantity === 'acceleration') return waveform.acceleration;
+  if (quantity === 'velocity') return waveform.velocity;
+  return waveform.displacement;
+}
+
+function conciseComponentLabels(waveforms: readonly DerivedWaveform[]): string[] {
+  const baseLabels = waveforms.map((waveform) => waveform.componentLabel.trim() || waveform.component);
+  const totals = new Map<string, number>();
+  baseLabels.forEach((label) => totals.set(label, (totals.get(label) ?? 0) + 1));
+  const seen = new Map<string, number>();
+  return baseLabels.map((label) => {
+    const occurrence = (seen.get(label) ?? 0) + 1;
+    seen.set(label, occurrence);
+    return (totals.get(label) ?? 0) > 1 ? `${label}-${occurrence}` : label;
+  });
+}
+
+function positiveSupport(
+  spectrum: FourierSpectrum,
+  independentResolutionHz: number,
+): [number, number] | undefined {
+  let maximum = 0;
+  spectrum.amplitude.forEach((amplitude) => {
+    if (Number.isFinite(amplitude) && amplitude > maximum) maximum = amplitude;
+  });
+  if (!(maximum > 0)) return undefined;
+
+  const floor = maximum * RELATIVE_SUPPORT_FLOOR;
+  let minimumFrequency = Infinity;
+  let maximumFrequency = 0;
+  const count = Math.min(spectrum.frequency.length, spectrum.amplitude.length);
+  for (let index = 0; index < count; index += 1) {
+    const frequency = spectrum.frequency[index];
+    const amplitude = spectrum.amplitude[index];
+    if (!Number.isFinite(frequency) || frequency < independentResolutionHz) continue;
+    if (!Number.isFinite(amplitude) || amplitude <= floor) continue;
+    minimumFrequency = Math.min(minimumFrequency, frequency);
+    maximumFrequency = Math.max(maximumFrequency, frequency);
+  }
+  return Number.isFinite(minimumFrequency) && maximumFrequency > minimumFrequency
+    ? [minimumFrequency, maximumFrequency]
+    : undefined;
+}
+
+function commonDisplayBand(analyses: readonly AnalysedWaveform[]): [number, number] {
+  if (analyses.length === 0) return [0.01, 1];
+  const lowerFallback = Math.max(0, ...analyses.map((entry) => {
+    const { preprocessing } = entry.waveform;
+    const highpass = preprocessing?.applyHighpass
+      && preprocessing.highpassHz > 0
+      && preprocessing.highpassHz < entry.analysis.metadata.nyquistFrequencyHz
+      ? preprocessing.highpassHz
+      : 0;
+    return Math.max(entry.analysis.metadata.independentResolutionHz, highpass);
+  }));
+  const upperFallback = Math.min(Infinity, ...analyses.map((entry) => {
+    const { preprocessing } = entry.waveform;
+    const lowpass = preprocessing?.applyLowpass
+      && preprocessing.lowpassHz > 0
+      && preprocessing.lowpassHz < entry.analysis.metadata.nyquistFrequencyHz
+      ? preprocessing.lowpassHz
+      : entry.analysis.metadata.nyquistFrequencyHz;
+    return Math.min(entry.analysis.metadata.nyquistFrequencyHz, lowpass);
+  }));
+  const supports = analyses.map((entry) => positiveSupport(
+    entry.analysis.spectrum,
+    entry.analysis.metadata.independentResolutionHz,
+  ));
+  const lower = Math.max(lowerFallback, ...supports.map((support) => support?.[0] ?? lowerFallback));
+  const upper = Math.min(upperFallback, ...supports.map((support) => support?.[1] ?? upperFallback));
+  if (lower > 0 && upper > lower * 1.01) return [lower, upper];
+
+  const firstPositive = Math.max(0, ...analyses.map((entry) => entry.analysis.metadata.firstPositiveFrequencyHz));
+  return upperFallback > firstPositive
+    ? [Math.max(firstPositive, lowerFallback), upperFallback]
+    : [0.01, 1];
+}
+
+function clippedSpectrum(spectrum: FourierSpectrum, domain: [number, number]): { x: number[]; y: number[] } {
+  const x: number[] = [];
+  const y: number[] = [];
+  const count = Math.min(spectrum.frequency.length, spectrum.amplitude.length);
+  for (let index = 0; index < count; index += 1) {
+    const frequency = spectrum.frequency[index];
+    const amplitude = spectrum.amplitude[index];
+    if (frequency < domain[0] || frequency > domain[1] || !Number.isFinite(amplitude) || amplitude <= 0) continue;
+    x.push(frequency);
+    y.push(amplitude);
+  }
+  return { x, y };
 }
 
 function fourierYDomain(series: readonly ChartSeries[], mode: FourierYRange): [number, number] {
@@ -44,31 +157,162 @@ function fourierYDomain(series: readonly ChartSeries[], mode: FourierYRange): [n
   return [Math.min(lower, upper / 10), upper];
 }
 
+function formatFrequency(value: number): string {
+  if (!Number.isFinite(value)) return 'n/a';
+  if (value >= 10) return Number(value.toFixed(1)).toString();
+  if (value >= 1) return Number(value.toFixed(2)).toString();
+  return Number(value.toPrecision(3)).toString();
+}
+
+function formatValueRange(values: readonly number[]): string {
+  const finite = values.filter((value) => Number.isFinite(value));
+  if (finite.length === 0) return 'n/a';
+  const minimum = Math.min(...finite);
+  const maximum = Math.max(...finite);
+  return Math.abs(maximum - minimum) <= Math.max(Math.abs(maximum), 1) * 1e-10
+    ? formatFrequency(minimum)
+    : `${formatFrequency(minimum)}–${formatFrequency(maximum)}`;
+}
+
 export function FourierPanel({ waveforms }: FourierPanelProps): JSX.Element {
+  const [recordSetId, setRecordSetId] = useState('');
   const [quantity, setQuantity] = useState<Quantity>('acceleration');
   const [yRange, setYRange] = useState<FourierYRange>('journal');
+  const [displayMode, setDisplayMode] = useState<FourierDisplayMode>('smoothed-raw');
+  const [timeWindow, setTimeWindow] = useState<FourierWindow>('cosine-5');
+  const [smoothingBandwidth, setSmoothingBandwidth] = useState(40);
+  const recordSets = useMemo(() => buildWaveformRecordSets(waveforms), [waveforms]);
+  const selectedRecordSet = recordSets.find((set) => set.id === (recordSetId || recordSets[0]?.id)) ?? recordSets[0];
+  const selectedWaveforms = selectedRecordSet?.waveforms ?? [];
+  const exportRecordSetSuffix = selectedRecordSet?.label ? `_${selectedRecordSet.label}` : '';
 
-  const series = useMemo<ChartSeries[]>(() => waveforms.map((waveform) => {
-    const values = quantity === 'acceleration' ? waveform.acceleration : quantity === 'velocity' ? waveform.velocity : waveform.displacement;
-    const spectrum = computeFourierSpectrum(values, waveform.dt, unitForQuantity(quantity));
-    const x: number[] = [];
-    const y: number[] = [];
-    for (let i = 0; i < spectrum.frequency.length; i += 1) {
-      const f = spectrum.frequency[i];
-      if (f >= 0.05 && f <= 50 && spectrum.amplitude[i] > 0) {
-        x.push(f);
-        y.push(spectrum.amplitude[i]);
-      }
-    }
-    return { id: waveform.sourceRecordId, name: waveformSeriesLabel(waveform), x, y, style: componentSeriesStyle(waveform.component) };
-  }), [waveforms, quantity]);
+  const analyses = useMemo<AnalysedWaveform[]>(() => {
+    const labels = conciseComponentLabels(selectedWaveforms);
+    return selectedWaveforms.map((waveform, index) => ({
+      waveform,
+      label: labels[index],
+      analysis: computeFourierAnalysis(
+        valuesForQuantity(waveform, quantity),
+        waveform.dt,
+        unitForQuantity(quantity),
+        {
+          applyFrequencyTaper: false,
+          applyTimeTaper: timeWindow === 'cosine-5',
+          timeTaperFraction: 0.05,
+        },
+      ),
+    }));
+  }, [quantity, selectedWaveforms, timeWindow]);
+
+  const xDomain = useMemo<[number, number]>(() => commonDisplayBand(analyses), [analyses]);
+
+  const smoothedSpectra = useMemo(() => analyses.map((entry) => smoothFourierSpectrumKonnoOhmachi(
+    entry.analysis.spectrum,
+    {
+      bandwidth: smoothingBandwidth,
+      minFrequencyHz: xDomain[0],
+      maxFrequencyHz: xDomain[1],
+      outputCount: SMOOTHED_POINT_COUNT,
+    },
+  )), [analyses, smoothingBandwidth, xDomain]);
+
+  const series = useMemo<ChartSeries[]>(() => {
+    const rawSeries = analyses.map((entry, index): ChartSeries => {
+      const points = clippedSpectrum(entry.analysis.spectrum, xDomain);
+      return {
+        id: `${entry.waveform.sourceRecordId}-raw`,
+        name: entry.label,
+        ...points,
+        style: componentSeriesStyle(entry.waveform.component, index),
+        showInLegend: displayMode === 'raw',
+        lineWidthPt: displayMode === 'raw' ? 0.65 : 0.5,
+        opacity: displayMode === 'raw' ? 1 : 0.2,
+      };
+    });
+    const smoothSeries = analyses.map((entry, index): ChartSeries => {
+      const points = clippedSpectrum(smoothedSpectra[index], xDomain);
+      return {
+        id: `${entry.waveform.sourceRecordId}-ko-${smoothingBandwidth}`,
+        name: entry.label,
+        ...points,
+        style: componentSeriesStyle(entry.waveform.component, index),
+        showInLegend: true,
+        lineWidthPt: 0.9,
+      };
+    });
+    if (displayMode === 'raw') return rawSeries;
+    if (displayMode === 'smoothed') return smoothSeries;
+    return [...rawSeries, ...smoothSeries];
+  }, [analyses, displayMode, smoothingBandwidth, smoothedSpectra, xDomain]);
+
   const yDomain = useMemo(() => fourierYDomain(series, yRange), [series, yRange]);
+
+  const processingCaption = useMemo(() => {
+    const windowLabel = timeWindow === 'cosine-5' ? '5% cosine edge taper' : 'rectangular window';
+    const df = formatValueRange(analyses.map((entry) => entry.analysis.metadata.fftBinSpacingHz));
+    const resolution = formatValueRange(analyses.map((entry) => entry.analysis.metadata.independentResolutionHz));
+    const modeLabel = displayMode === 'raw'
+      ? 'raw ordinates'
+      : `Konno–Ohmachi b=${smoothingBandwidth} (${SMOOTHED_POINT_COUNT} log-spaced targets)${displayMode === 'smoothed-raw' ? '; raw ordinates faint' : ''}`;
+    const priorProcessing = [...new Set(analyses.map((entry) => {
+      const settings = entry.waveform.preprocessing;
+      if (!settings) return 'upstream preprocessing unavailable';
+      return preprocessingLabel(settings);
+    }))].join(' / ');
+    const ordinate = yRange === 'journal' ? 'ordinate clipped at peak minus four decades' : 'all positive ordinates shown';
+    return `Data: ${datasetLabel(analyses.map((entry) => entry.waveform))}. Upstream: ${priorProcessing}. Fourier stage: mean removed; ${windowLabel}; positive-frequency |DFT|Δt (DC omitted, ×1, no record-length or window-gain normalization); FFT-bin df ${df} Hz; independent resolution ≈1/T ${resolution} Hz; display band ${formatFrequency(xDomain[0])}–${formatFrequency(xDomain[1])} Hz (common resolved viewer-analysis band); ${modeLabel}; ${ordinate}. Instrument/sensor response limits require external metadata.`;
+  }, [analyses, displayMode, smoothingBandwidth, timeWindow, xDomain, yRange]);
+
+  const figureMetadata = useMemo(() => ({
+    schema: 'strong-motion-fourier-spectrum/1.0',
+    recordSet: selectedRecordSet?.label,
+    provenance: buildFigureProvenance(analyses.map((entry) => entry.waveform)),
+    quantity,
+    spectrumDefinition: {
+      meanRemoved: true,
+      sidedness: 'positive-frequency half-spectrum; DC omitted; Nyquist retained',
+      amplitude: '|DFT| * dt',
+      oneSidedFactor: 1,
+      recordLengthNormalization: false,
+      windowGainCorrection: false,
+      fourierStageFrequencyTaper: false,
+      timeWindow: timeWindow === 'cosine-5' ? '5% cosine edge taper' : 'rectangular',
+    },
+    display: {
+      mode: displayMode,
+      yRange,
+      commonResolvedBandHz: xDomain,
+      fallbackNonZeroSupportRelativeFloor: RELATIVE_SUPPORT_FLOOR,
+    },
+    smoothing: displayMode === 'raw' ? null : {
+      method: 'Konno-Ohmachi',
+      bandwidth: smoothingBandwidth,
+      outputCount: SMOOTHED_POINT_COUNT,
+      kernel: '[sin(b log10(f/fc))/(b log10(f/fc))]^4',
+      retainedZeroCrossingsEachSide: 4,
+    },
+    records: analyses.map((entry) => ({
+      id: entry.waveform.sourceRecordId,
+      fileName: entry.waveform.fileName,
+      component: entry.label,
+      upstreamPreprocessing: entry.waveform.preprocessing ?? null,
+      ...entry.analysis.metadata,
+    })),
+  }), [analyses, displayMode, quantity, selectedRecordSet?.label, smoothingBandwidth, timeWindow, xDomain, yRange]);
 
   if (waveforms.length === 0) return <p className="empty-state">No data is available for Fourier spectra.</p>;
 
   return (
     <div className="chart-stack">
       <div className="inline-controls">
+        {recordSets.length > 1 && selectedRecordSet && (
+          <label>
+            Record set
+            <select value={selectedRecordSet.id} onChange={(event) => setRecordSetId(event.target.value)}>
+              {recordSets.map((set) => <option key={set.id} value={set.id}>{set.label}</option>)}
+            </select>
+          </label>
+        )}
         <label>
           Quantity
           <select value={quantity} onChange={(event) => setQuantity(event.target.value as Quantity)}>
@@ -78,13 +322,36 @@ export function FourierPanel({ waveforms }: FourierPanelProps): JSX.Element {
           </select>
         </label>
         <label>
+          Display
+          <select value={displayMode} onChange={(event) => setDisplayMode(event.target.value as FourierDisplayMode)}>
+            <option value="smoothed-raw">Smoothed + faint raw</option>
+            <option value="smoothed">Smoothed only</option>
+            <option value="raw">Raw only</option>
+          </select>
+        </label>
+        <label>
+          KO bandwidth
+          <select value={smoothingBandwidth} disabled={displayMode === 'raw'} onChange={(event) => setSmoothingBandwidth(Number(event.target.value))}>
+            <option value={20}>20 · broader</option>
+            <option value={40}>40 · standard</option>
+            <option value={60}>60 · narrower</option>
+          </select>
+        </label>
+        <label>
+          Window
+          <select value={timeWindow} onChange={(event) => setTimeWindow(event.target.value as FourierWindow)}>
+            <option value="cosine-5">Cosine · 5% each edge</option>
+            <option value="rectangular">Rectangular</option>
+          </select>
+        </label>
+        <label>
           Y Range
           <select value={yRange} onChange={(event) => setYRange(event.target.value as FourierYRange)}>
             <option value="journal">Peak − 4 decades</option>
             <option value="full">All positive values</option>
           </select>
         </label>
-        <span className="note">The journal range clips values below the peak-minus-four-decades threshold.</span>
+        <span className="note">The frequency axis is the common resolved viewer-analysis band from record duration, sampling, and active preprocessing; instrument response limits require external metadata.</span>
       </div>
       <SvgChart
         title={`Fourier Amplitude Spectrum: ${quantityLabel(quantity)}`}
@@ -93,10 +360,16 @@ export function FourierPanel({ waveforms }: FourierPanelProps): JSX.Element {
         series={series}
         xScale="log"
         yScale="log"
+        domainX={xDomain}
         domainY={yDomain}
-        fileNameBase={`fourier_${quantity}`}
-        height={430}
-        description={`One-sided Fourier amplitude spectra of ${quantityLabel(quantity).toLowerCase()} on logarithmic axes. Display range is 0.05–50 Hz. ${yRange === 'journal' ? 'The lower ordinate limit is four decades below the largest amplitude.' : 'The ordinate includes every positive computed amplitude.'}`}
+        fileNameBase={`fourier_${quantity}_${displayMode}${displayMode === 'raw' ? '' : `_ko${smoothingBandwidth}`}${exportRecordSetSuffix}`}
+        height={460}
+        cornerNote={displayMode === 'raw'
+          ? `${timeWindow === 'cosine-5' ? '5% cosine taper' : 'rectangular window'}; raw FAS`
+          : `Konno–Ohmachi b=${smoothingBandwidth}${displayMode === 'smoothed-raw' ? '; faint = raw' : ''}`}
+        caption={processingCaption}
+        metadata={figureMetadata}
+        description={`Positive-frequency Fourier amplitude spectra of ${quantityLabel(quantity).toLowerCase()}. The plotted common resolved band is ${formatFrequency(xDomain[0])} to ${formatFrequency(xDomain[1])} Hz. ${processingCaption}`}
       />
     </div>
   );

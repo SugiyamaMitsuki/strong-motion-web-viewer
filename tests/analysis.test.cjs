@@ -2,7 +2,11 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { fftComplex } = require('../.test-dist/src/analysis/fft.js');
-const { computeFourierSpectrum } = require('../.test-dist/src/analysis/fourier.js');
+const {
+  computeFourierAnalysis,
+  computeFourierSpectrum,
+  smoothFourierSpectrumKonnoOhmachi,
+} = require('../.test-dist/src/analysis/fourier.js');
 const {
   applyJmaFrequencyFilter,
   computeJmaIntensity,
@@ -13,7 +17,11 @@ const {
   computeSingleResponseSpectrum,
   generateLogPeriods,
 } = require('../.test-dist/src/analysis/responseSpectrum.js');
-const { computeMorletWavelet } = require('../.test-dist/src/analysis/wavelet.js');
+const {
+  computeDominantWaveletRidge,
+  computeMorletWavelet,
+  waveletMagnitudeToDecibels,
+} = require('../.test-dist/src/analysis/wavelet.js');
 const { parseJmaStrongMotionFile } = require('../.test-dist/src/parsers/jma.js');
 const { downsampleExtrema, downsampleSegments } = require('../.test-dist/src/visualization/downsample.js');
 const {
@@ -139,6 +147,94 @@ test('Fourier spectra do not apply a hidden frequency taper by default', () => {
   );
 
   assert.ok(plain.amplitude[index] > tapered.amplitude[index] * 1.8);
+});
+
+test('Fourier analysis reports its positive-frequency scaling and physical frequency limits', () => {
+  const dt = 0.02;
+  const values = Array.from({ length: 1000 }, (_, index) => Math.cos(2 * Math.PI * 2.5 * index * dt));
+  const result = computeFourierAnalysis(values, dt, 'cm/s²', {
+    applyFrequencyTaper: false,
+    applyTimeTaper: true,
+    timeTaperFraction: 0.05,
+  });
+
+  assert.equal(result.metadata.sampleCount, 1000);
+  assert.equal(result.metadata.recordDurationSec, 20);
+  assert.equal(result.metadata.independentResolutionHz, 0.05);
+  assert.equal(result.metadata.nyquistFrequencyHz, 25);
+  assert.equal(result.metadata.timeWindow, 'cosine-edge-taper');
+  assert.equal(result.metadata.timeTaperFraction, 0.05);
+  assert.equal(result.metadata.sidedness, 'positive-frequency-half-spectrum');
+  assert.equal(result.metadata.amplitudeNormalization, 'absolute-dft-times-dt');
+  assert.equal(result.metadata.oneSidedFactor, 1);
+  assert.equal(result.metadata.windowGainCorrected, false);
+  assert.ok(result.metadata.windowCoherentGain > 0.89 && result.metadata.windowCoherentGain < 0.96);
+  assert.equal(result.spectrum.frequency[0], result.metadata.fftBinSpacingHz);
+  assert.equal(result.spectrum.frequency.at(-1), 25);
+});
+
+test('Konno-Ohmachi smoothing preserves a constant spectrum on a log-frequency grid', () => {
+  const frequency = Array.from({ length: 4000 }, (_, index) => 0.01 + index * 0.025);
+  const spectrum = { frequency, amplitude: frequency.map(() => 7.5), unit: 'cm/s' };
+  const smoothed = smoothFourierSpectrumKonnoOhmachi(spectrum, {
+    bandwidth: 40,
+    minFrequencyHz: 0.05,
+    maxFrequencyHz: 50,
+    outputCount: 181,
+  });
+
+  assert.equal(smoothed.frequency.length, 181);
+  assert.equal(smoothed.amplitude.length, 181);
+  assert.ok(Math.abs(smoothed.frequency[0] - 0.05) < 1e-12);
+  assert.ok(Math.abs(smoothed.frequency.at(-1) - 50) < 1e-10);
+  assert.ok(smoothed.amplitude.every((value) => Math.abs(value - 7.5) < 1e-10));
+  assert.equal(smoothed.smoothing.method, 'Konno-Ohmachi');
+  assert.equal(smoothed.smoothing.bandwidth, 40);
+});
+
+test('Konno-Ohmachi smoothing uses the published fourth-power log-frequency kernel', () => {
+  const spectrum = { frequency: [1, 2, 4], amplitude: [2, 5, 11], unit: 'cm/s' };
+  const bandwidth = 10;
+  const centre = 2;
+  const weights = spectrum.frequency.map((frequency) => {
+    const argument = bandwidth * Math.log10(frequency / centre);
+    const ratio = Math.abs(argument) < 1e-12 ? 1 : Math.sin(argument) / argument;
+    return ratio ** 4;
+  });
+  const expected = spectrum.amplitude.reduce((sum, value, index) => sum + value * weights[index], 0)
+    / weights.reduce((sum, value) => sum + value, 0);
+  const smoothed = smoothFourierSpectrumKonnoOhmachi(spectrum, {
+    bandwidth,
+    minFrequencyHz: centre,
+    maxFrequencyHz: centre,
+    outputCount: 2,
+  });
+
+  assert.equal(smoothed.frequency.length, 1);
+  assert.ok(Math.abs(smoothed.amplitude[0] - expected) < 1e-12);
+});
+
+test('Konno-Ohmachi smoothing suppresses isolated raw-bin spikes without shifting the peak band', () => {
+  const frequency = Array.from({ length: 5000 }, (_, index) => 0.01 + index * 0.01);
+  const amplitude = frequency.map((value) => 1 + 9 * Math.exp(-((Math.log(value / 5) / 0.08) ** 2)));
+  const spikeIndex = frequency.findIndex((value) => value >= 16);
+  amplitude[spikeIndex] = 1000;
+  const smoothed = smoothFourierSpectrumKonnoOhmachi(
+    { frequency, amplitude, unit: 'cm/s' },
+    { bandwidth: 40, minFrequencyHz: 0.1, maxFrequencyHz: 30, outputCount: 360 },
+  );
+  const smoothSpikeIndex = smoothed.frequency.reduce(
+    (best, value, index) => Math.abs(value - 16) < Math.abs(smoothed.frequency[best] - 16) ? index : best,
+    0,
+  );
+  const physicalPeakIndex = smoothed.frequency.reduce(
+    (best, value, index) => Math.abs(value - 5) < Math.abs(smoothed.frequency[best] - 5) ? index : best,
+    0,
+  );
+
+  assert.ok(smoothed.amplitude[smoothSpikeIndex] < 100);
+  assert.ok(smoothed.amplitude[physicalPeakIndex] > 7);
+  assert.ok(smoothed.frequency.every((value, index) => index === 0 || value > smoothed.frequency[index - 1]));
 });
 
 function referenceFftLength(sampleCount) {
@@ -727,6 +823,114 @@ test('L2-normalized Morlet coefficients report input units multiplied by square-
   assert.equal(result.unit, 'cm/s²·√s');
   assert.equal(result.normalization, 'L2');
   assert.ok(result.amplitude.length > 0);
+  assert.equal(result.resampling.applied, false);
+});
+
+function centralWaveletPeak(result) {
+  const start = Math.floor(result.time.length * 0.15);
+  const end = Math.ceil(result.time.length * 0.85);
+  let peak = { amplitude: 0, frequency: Number.NaN };
+  result.amplitude.forEach((row, frequencyIndex) => {
+    for (let timeIndex = start; timeIndex < end; timeIndex += 1) {
+      if (row[timeIndex] > peak.amplitude) {
+        peak = { amplitude: row[timeIndex], frequency: result.frequency[frequencyIndex] };
+      }
+    }
+  });
+  return peak;
+}
+
+test('wavelet downsampling suppresses aliases and records its anti-alias design', () => {
+  const dt = 0.001;
+  const sampleCount = 10000;
+  const maxSamples = 4096;
+  const options = { minFrequency: 1, maxFrequency: 10, frequencyCount: 36, maxSamples };
+  const highFrequency = 405;
+  const duration = (sampleCount - 1) * dt;
+  const effectiveSamplingHz = (maxSamples - 1) / duration;
+  const aliasedFrequency = Math.abs(highFrequency - effectiveSamplingHz);
+  const high = computeMorletWavelet(
+    Array.from({ length: sampleCount }, (_, index) => Math.sin(2 * Math.PI * highFrequency * index * dt)),
+    dt,
+    'cm/s²',
+    options,
+  );
+  const aliasReference = computeMorletWavelet(
+    Array.from({ length: sampleCount }, (_, index) => Math.sin(2 * Math.PI * aliasedFrequency * index * dt)),
+    dt,
+    'cm/s²',
+    options,
+  );
+  const highPeak = centralWaveletPeak(high);
+  const aliasPeak = centralWaveletPeak(aliasReference);
+
+  assert.equal(high.resampling.applied, true);
+  assert.equal(high.resampling.method, 'Kaiser-windowed sinc polyphase anti-alias resampling');
+  assert.equal(high.resampling.inputSamples, sampleCount);
+  assert.equal(high.resampling.computedSamples, maxSamples);
+  assert.ok(high.resampling.passbandEndHz < high.resampling.stopbandStartHz);
+  assert.ok(highPeak.amplitude < aliasPeak.amplitude * 0.01);
+});
+
+test('wavelet anti-alias resampling preserves an in-band sinusoid', () => {
+  const dt = 0.001;
+  const sampleCount = 10000;
+  const values = Array.from({ length: sampleCount }, (_, index) => Math.sin(2 * Math.PI * 4 * index * dt));
+  const common = { minFrequency: 1, maxFrequency: 10, frequencyCount: 36 };
+  const full = computeMorletWavelet(values, dt, 'cm/s²', { ...common, maxSamples: sampleCount });
+  const reduced = computeMorletWavelet(values, dt, 'cm/s²', { ...common, maxSamples: 4096 });
+  const fullPeak = centralWaveletPeak(full);
+  const reducedPeak = centralWaveletPeak(reduced);
+  const adjacentLogRatio = (10 / 1) ** (1 / (common.frequencyCount - 1));
+
+  assert.ok(Math.max(fullPeak.frequency, reducedPeak.frequency) / Math.min(fullPeak.frequency, reducedPeak.frequency) <= adjacentLogRatio * 1.001);
+  assert.ok(Math.abs(reducedPeak.amplitude / fullPeak.amplitude - 1) < 0.05);
+});
+
+test('wavelet magnitude decibels use an explicit reusable amplitude reference', () => {
+  assert.equal(waveletMagnitudeToDecibels(1, 1), 0);
+  assert.ok(Math.abs(waveletMagnitudeToDecibels(10, 1) - 20) < 1e-12);
+  assert.ok(Math.abs(waveletMagnitudeToDecibels(0.1, 1) + 20) < 1e-12);
+  assert.equal(waveletMagnitudeToDecibels(0, 1), Number.NEGATIVE_INFINITY);
+  assert.equal(waveletMagnitudeToDecibels(1, 0), Number.NEGATIVE_INFINITY);
+});
+
+test('descriptive wavelet ridge selects per-time maxima only inside the cone of influence', () => {
+  const ridge = computeDominantWaveletRidge({
+    time: [0, 1, 2, 3, 4],
+    frequency: [1, 2],
+    amplitude: [
+      [100, 4, 3, 2, 100],
+      [100, 2, 5, 1, 100],
+    ],
+    inputUnit: 'cm/s²',
+    unit: 'cm/s²·√s',
+    normalization: 'L2',
+    effectiveDt: 1,
+    inputSamples: 5,
+    computedSamples: 5,
+  }, {
+    morletOmega0: 2,
+    excludeOutsideConeOfInfluence: true,
+  });
+
+  assert.ok(Number.isNaN(ridge.frequency[0]));
+  assert.deepEqual(ridge.frequency.slice(1, 4), [1, 2, 1]);
+  assert.deepEqual(ridge.amplitude.slice(1, 4), [4, 5, 2]);
+  assert.ok(Number.isNaN(ridge.frequency[4]));
+
+  const zeroRidge = computeDominantWaveletRidge({
+    time: [0, 1],
+    frequency: [1],
+    amplitude: [[0, 0]],
+    inputUnit: 'cm/s²',
+    unit: 'cm/s²·√s',
+    normalization: 'L2',
+    effectiveDt: 1,
+    inputSamples: 2,
+    computedSamples: 2,
+  }, { excludeOutsideConeOfInfluence: false });
+  assert.ok(zeroRidge.frequency.every(Number.isNaN));
 });
 
 test('publication SVG sizing preserves aspect ratio and accepts exact A4 dimensions', () => {
