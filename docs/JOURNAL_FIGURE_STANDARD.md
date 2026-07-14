@@ -38,7 +38,10 @@
 ### Fourier spectrum
 
 - 窓は 5% cosine taper を既定とし、rectangular も選択できるようにする。選択した窓は caption と metadata に明示する。
-- 論文用の既定表示は Konno–Ohmachi 平滑線（b = 40）を主曲線とし、raw FFT は薄い 0.5 pt の補助線とする。b = 20/40/60 と raw/smoothed の切替を残す。
+- 論文用の既定表示は Parzen 平滑（本アプリの既定 `B = 0.10 Hz`）を主曲線とし、raw FFT は薄い 0.5 pt の補助線とする。`B = 0.05/0.10/0.20/0.40 Hz` と raw/smoothed の切替を残す。これらの値を ViewWave 公式既定値とは表記しない。
+- ViewWave の記載に沿い、振幅を直接平均せず、`|DFT|²` を Parzen 窓で平滑化してから平方根で振幅へ戻す。平滑化は表示帯域の切り出し前に全FFTビン上で行い、DC/Nyquist は Hermitian 対称の両側スペクトルとして扱う。
+- Parzen 窓は `u = 280/(151B)`、`W(Δf) = 3u/4 [sin(πuΔf/2)/(πuΔf/2)]⁴` とし、離散カーネルの総和を1に正規化する。出力は元の正周波数FFTビンを保つ。
+- Konno–Ohmachi `b = 20/40/60` は比較用の明示的な代替手法として残す。H/V 比の Konno–Ohmachi 既定は変更しない。
 - 正の片側振幅、`|DFT|Δt`、FFT-bin 間隔 `df`、独立分解能 `1/T`、window、平滑化帯域を caption と metadata に明示する。
 - 記録長、Nyquist 周波数、実際の high-pass / low-pass 設定から共通表示周波数帯を決める。
 - 別イベント・別観測点・別チャンネルは同一図に重ねず、record-set selector で選択する。
@@ -80,6 +83,10 @@
 - [Earthquake Engineering & Structural Dynamics Author Guidelines](https://onlinelibrary.wiley.com/page/journal/10969845/homepage/forauthors.html)
 - [Wiley Electronic Artwork Guidelines](https://authorservices.wiley.com/asset/photos/electronic_artwork_guidelines.pdf)
 - [ViewWave official overview](https://iisee.kenken.go.jp/staff/kashima/viewwave_j.html)
+- [ViewWave Fourier-spectrum documentation](https://smo.kenken.go.jp/~kashima/viewwave/basic/fourier)
+- [ViewWave 2.2 manual, Fourier spectrum equations 29–32](https://smo.kenken.go.jp/~kashima/sites/default/files/viewwave/vw_manual220.pdf)
+- [IISEE strong-motion lecture, Parzen 0/0.1/0.2/0.4 Hz comparison](https://iisee.kenken.go.jp/lna/download.php?cid=E1-230-2009&f=201110074263b195.pdf&n=E1-230-2009_smo2009.pdf)
+- [NILIM technical report, Parzen bandwidth definition](https://www.nilim.go.jp/lab/bcg/siryou/rpn/rpn0075pdf/kh0075.pdf)
 - [ViewWave response-spectrum documentation](https://smo.kenken.go.jp/~kashima/viewwave/basic/response)
 - [ViewWave update history](https://smo.kenken.go.jp/~kashima/viewwave/technical/updates)
 

@@ -45,7 +45,9 @@ https://sugiyamamitsuki.github.io/strong-motion-web-viewer/
   - Different sampling intervals are resampled onto a shared time grid
   - Square plots with equal X/Y scale
 - Fourier amplitude spectra
-  - Konno–Ohmachi-smoothed journal curve (`b = 40` by default; `20/40/60` selectable) with the raw FFT retained as a faint 0.5 pt diagnostic trace
+  - ViewWave-style Parzen smoothing of squared amplitude (power), followed by square-root amplitude recovery on the original FFT-bin grid
+  - `B = 0.10 Hz` app default with `0.05/0.10/0.20/0.40 Hz` selectable; Konno–Ohmachi `b = 20/40/60` remains available as an explicit alternative
+  - The raw FFT is retained as a faint 0.5 pt diagnostic trace behind the journal curve
   - Raw / smoothed / combined views and an explicit 5% cosine or rectangular time-window choice
   - A shared frequency band derived from record length, Nyquist frequency, and the active high-pass / low-pass preprocessing
   - Event/station/channel record-set selection prevents unrelated spectra or duplicate component styles from being overlaid
@@ -124,7 +126,7 @@ https://sugiyamamitsuki.github.io/strong-motion-web-viewer/
 - Data export
   - Time-history CSV
   - Distance CSV
-  - Fourier spectrum CSV
+  - Rectangular-window raw Fourier spectrum CSV (figure-specific time-window and smoothing settings are recorded separately in its Methods JSON)
   - Horizontal-to-vertical spectral ratio CSV
   - Response spectrum CSV
   - Summary JSON

@@ -5,7 +5,9 @@ const { fftComplex } = require('../.test-dist/src/analysis/fft.js');
 const {
   computeFourierAnalysis,
   computeFourierSpectrum,
+  parzenWindowWeight,
   smoothFourierSpectrumKonnoOhmachi,
+  smoothFourierSpectrumParzen,
 } = require('../.test-dist/src/analysis/fourier.js');
 const {
   applyJmaFrequencyFilter,
@@ -171,6 +173,156 @@ test('Fourier analysis reports its positive-frequency scaling and physical frequ
   assert.ok(result.metadata.windowCoherentGain > 0.89 && result.metadata.windowCoherentGain < 0.96);
   assert.equal(result.spectrum.frequency[0], result.metadata.fftBinSpacingHz);
   assert.equal(result.spectrum.frequency.at(-1), 25);
+  assert.ok(Number.isFinite(result.metadata.dcAmplitude));
+});
+
+test('Fourier amplitude uses the documented |DFT| times dt normalization', () => {
+  const dt = 0.01;
+  const sampleCount = 1024;
+  const amplitude = 3;
+  const cycleCount = 52;
+  const frequencyHz = cycleCount / (sampleCount * dt);
+  const values = Array.from(
+    { length: sampleCount },
+    (_, index) => amplitude * Math.cos(2 * Math.PI * frequencyHz * index * dt),
+  );
+  const result = computeFourierAnalysis(values, dt, 'cm/s²', {
+    applyFrequencyTaper: false,
+    applyTimeTaper: false,
+  });
+  const bin = result.spectrum.frequency.findIndex((value) => Math.abs(value - frequencyHz) < 1e-12);
+
+  assert.ok(bin >= 0);
+  assert.ok(Math.abs(result.spectrum.amplitude[bin] - amplitude * sampleCount * dt / 2) < 1e-11);
+  assert.ok(result.metadata.dcAmplitude < 1e-12);
+});
+
+function referenceParzenCircular(amplitude, dcAmplitude, df, bandwidthHz) {
+  const half = amplitude.length;
+  const n = half * 2;
+  const power = Array(n).fill(0);
+  power[0] = dcAmplitude ** 2;
+  for (let k = 1; k < half; k += 1) {
+    power[k] = amplitude[k - 1] ** 2;
+    power[n - k] = power[k];
+  }
+  power[half] = amplitude[half - 1] ** 2;
+  const u = 280 / (151 * bandwidthHz);
+  const kernel = Array.from({ length: n }, (_, index) => {
+    const signedBin = index <= half ? index : index - n;
+    const argument = Math.PI * u * Math.abs(signedBin * df) / 2;
+    const sinc = argument < 1e-12 ? 1 : Math.sin(argument) / argument;
+    return (3 * u / 4) * sinc ** 4 * df;
+  });
+  const kernelSum = kernel.reduce((sum, value) => sum + value, 0);
+  const normalized = kernel.map((value) => value / kernelSum);
+  const smoothedPower = Array.from({ length: n }, (_, target) => power.reduce(
+    (sum, value, source) => sum + value * normalized[(target - source + n) % n],
+    0,
+  ));
+  return {
+    amplitude: Array.from({ length: half }, (_, index) => Math.sqrt(smoothedPower[index + 1])),
+    smoothedPower,
+    normalized,
+    power,
+  };
+}
+
+test('Parzen window uses the ViewWave bandwidth definition in Hz', () => {
+  const bandwidthHz = 0.1;
+  const u = 280 / (151 * bandwidthHz);
+  const firstZero = 2 / u;
+
+  assert.ok(Math.abs(parzenWindowWeight(0, bandwidthHz) - 3 * u / 4) < 1e-12);
+  assert.ok(parzenWindowWeight(firstZero, bandwidthHz) < 1e-55);
+  assert.equal(parzenWindowWeight(0, 0), 0);
+});
+
+test('Parzen smoothing is a normalized circular convolution of squared amplitude', () => {
+  const df = 0.05;
+  const frequency = Array.from({ length: 8 }, (_, index) => (index + 1) * df);
+  const amplitude = [0.4, 1, 3, 0.8, 1.7, 0.2, 2.2, 0.6];
+  const dcAmplitude = 0.3;
+  const bandwidthHz = 0.2;
+  const reference = referenceParzenCircular(amplitude, dcAmplitude, df, bandwidthHz);
+  const actual = smoothFourierSpectrumParzen(
+    { frequency, amplitude, unit: 'cm/s' },
+    { bandwidthHz, dcAmplitude },
+  );
+
+  assert.deepEqual(actual.frequency, frequency);
+  assert.ok(maxAbsoluteDifference(actual.amplitude, reference.amplitude) < 2e-12);
+  assert.equal(actual.smoothing.domain, 'squared-amplitude-power');
+  assert.equal(actual.smoothing.outputGrid, 'original-positive-fft-bin-grid');
+  const target = 3;
+  const n = amplitude.length * 2;
+  const twoSidedAmplitude = reference.power.map((value) => Math.sqrt(value));
+  const incorrectlyAveragedAmplitude = twoSidedAmplitude.reduce(
+    (sum, value, source) => sum + value * reference.normalized[(target - source + n) % n],
+    0,
+  );
+  assert.ok(Math.abs(actual.amplitude[target - 1] - incorrectlyAveragedAmplitude) > 1e-3);
+});
+
+test('Parzen smoothing preserves constants and total two-sided power', () => {
+  const df = 0.01;
+  const constant = 7.5;
+  const frequency = Array.from({ length: 512 }, (_, index) => (index + 1) * df);
+  const actual = smoothFourierSpectrumParzen(
+    { frequency, amplitude: frequency.map(() => constant), unit: 'cm/s' },
+    { bandwidthHz: 0.1, dcAmplitude: constant },
+  );
+
+  assert.ok(actual.amplitude.every((value) => Math.abs(value - constant) < 2e-11));
+  assert.ok(Math.abs(actual.smoothing.smoothedDcAmplitude - constant) < 2e-11);
+  assert.ok(actual.smoothing.relativePowerConservationError < 2e-12);
+  assert.equal(actual.smoothing.bandwidthHz, 0.1);
+  assert.ok(Math.abs(actual.smoothing.bandwidthParameterUSeconds - 280 / 15.1) < 1e-12);
+  assert.ok(Math.abs(actual.smoothing.firstZeroOffsetHz - 151 * 0.1 / 140) < 1e-12);
+});
+
+test('Parzen smoothing treats isolated DC and Nyquist power like direct two-sided convolution', () => {
+  const df = 0.02;
+  const frequency = Array.from({ length: 64 }, (_, index) => (index + 1) * df);
+  const cases = [
+    { amplitude: frequency.map(() => 0), dcAmplitude: 5 },
+    { amplitude: frequency.map((_, index) => index === frequency.length - 1 ? 5 : 0), dcAmplitude: 0 },
+  ];
+
+  cases.forEach(({ amplitude, dcAmplitude }) => {
+    const reference = referenceParzenCircular(amplitude, dcAmplitude, df, 0.1);
+    const actual = smoothFourierSpectrumParzen(
+      { frequency, amplitude, unit: 'cm/s' },
+      { bandwidthHz: 0.1, dcAmplitude },
+    );
+    assert.ok(maxAbsoluteDifference(
+      actual.amplitude.map((value) => value ** 2),
+      reference.smoothedPower.slice(1, frequency.length + 1),
+    ) < 2e-12);
+    assert.ok(Math.abs(actual.smoothing.smoothedDcAmplitude ** 2 - reference.smoothedPower[0]) < 2e-12);
+    assert.ok(actual.smoothing.relativePowerConservationError < 2e-12);
+  });
+});
+
+test('Parzen zero width returns raw ordinates and amplitude scaling remains linear', () => {
+  const frequency = Array.from({ length: 16 }, (_, index) => (index + 1) * 0.1);
+  const amplitude = frequency.map((value, index) => 0.2 + value + (index % 3));
+  const raw = smoothFourierSpectrumParzen(
+    { frequency, amplitude, unit: 'cm/s' },
+    { bandwidthHz: 0, dcAmplitude: 0.25 },
+  );
+  const original = smoothFourierSpectrumParzen(
+    { frequency, amplitude, unit: 'cm/s' },
+    { bandwidthHz: 0.2, dcAmplitude: 0.25 },
+  );
+  const scaled = smoothFourierSpectrumParzen(
+    { frequency, amplitude: amplitude.map((value) => value * 4), unit: 'cm/s' },
+    { bandwidthHz: 0.2, dcAmplitude: 1 },
+  );
+
+  assert.deepEqual(raw.amplitude, amplitude);
+  assert.equal(raw.smoothing.applied, false);
+  assert.ok(maxAbsoluteDifference(scaled.amplitude, original.amplitude.map((value) => value * 4)) < 2e-12);
 });
 
 test('Konno-Ohmachi smoothing preserves a constant spectrum on a log-frequency grid', () => {

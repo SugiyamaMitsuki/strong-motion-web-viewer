@@ -25,6 +25,8 @@ export interface FourierComputationMetadata {
   sidedness: 'positive-frequency-half-spectrum';
   amplitudeNormalization: 'absolute-dft-times-dt';
   oneSidedFactor: 1;
+  /** DC amplitude on the same |DFT| * dt scale; retained for edge-correct smoothing. */
+  dcAmplitude: number;
 }
 
 export interface FourierAnalysisResult {
@@ -41,6 +43,38 @@ export interface KonnoOhmachiOptions {
   outputCount?: number;
   /** Number of kernel zero crossings retained on each side. */
   halfWindowCycles?: number;
+}
+
+export const DEFAULT_PARZEN_BANDWIDTH_HZ = 0.1;
+
+export interface ParzenOptions {
+  /** Parzen bandwidth B in Hz. Zero returns the unsmoothed spectrum. */
+  bandwidthHz?: number;
+  /** DC amplitude on the same |DFT| * dt scale as the supplied ordinates. */
+  dcAmplitude?: number;
+}
+
+export interface ParzenSmoothedFourierSpectrum extends FourierSpectrum {
+  smoothing: {
+    method: 'Parzen';
+    applied: boolean;
+    bandwidthHz: number;
+    bandwidthParameterUSeconds: number;
+    firstZeroOffsetHz: number;
+    fftBinSpacingHz: number;
+    binsPerBandwidth: number;
+    domain: 'squared-amplitude-power';
+    amplitudeRecovery: 'square-root-after-power-smoothing';
+    kernel: '3u/4 * [sin(pi*u*deltaF/2)/(pi*u*deltaF/2)]^4';
+    kernelNormalization: 'unit-sum-on-two-sided-fft-grid';
+    boundaryTreatment: 'circular-convolution-of-hermitian-two-sided-spectrum';
+    outputGrid: 'original-positive-fft-bin-grid';
+    dcAmplitude: number;
+    smoothedDcAmplitude: number;
+    inputTwoSidedPowerSum: number;
+    outputTwoSidedPowerSum: number;
+    relativePowerConservationError: number;
+  };
 }
 
 export interface SmoothedFourierSpectrum extends FourierSpectrum {
@@ -119,6 +153,7 @@ export function computeFourierAnalysis(
         sidedness: 'positive-frequency-half-spectrum',
         amplitudeNormalization: 'absolute-dft-times-dt',
         oneSidedFactor: 1,
+        dcAmplitude: 0,
       },
     };
   }
@@ -153,6 +188,7 @@ export function computeFourierAnalysis(
   }
 
   const fftBinSpacingHz = 1 / (nFft * dt);
+  const dcAmplitude = Math.hypot(fftRe[0], fftIm[0]) * dt * taper[0];
   return {
     spectrum: { frequency, amplitude, unit },
     metadata: {
@@ -171,6 +207,7 @@ export function computeFourierAnalysis(
       sidedness: 'positive-frequency-half-spectrum',
       amplitudeNormalization: 'absolute-dft-times-dt',
       oneSidedFactor: 1,
+      dcAmplitude,
     },
   };
 }
@@ -203,6 +240,164 @@ function logarithmicGrid(minimum: number, maximum: number, count: number): numbe
   return Array.from({ length: count }, (_, index) => (
     Math.exp(logMin + (logSpan * index) / (count - 1))
   ));
+}
+
+/**
+ * Parzen spectral window used by ViewWave and common Japanese strong-motion
+ * workflows. B is specified in Hz and u = 280 / (151 B).
+ */
+export function parzenWindowWeight(deltaFrequencyHz: number, bandwidthHz: number): number {
+  if (!Number.isFinite(deltaFrequencyHz) || !Number.isFinite(bandwidthHz) || bandwidthHz <= 0) return 0;
+  const u = 280 / (151 * bandwidthHz);
+  const argument = Math.PI * u * Math.abs(deltaFrequencyHz) / 2;
+  const ratio = argument < 1e-12 ? 1 : Math.sin(argument) / argument;
+  return (3 * u / 4) * ratio ** 4;
+}
+
+function twoSidedPowerSum(power: readonly number[]): number {
+  return power.reduce((sum, value) => sum + value, 0);
+}
+
+/**
+ * Smooths squared Fourier amplitudes with the Parzen spectral window, then
+ * takes the square root to recover amplitude. This follows ViewWave's stated
+ * power -> Parzen convolution -> amplitude sequence; it does not average
+ * amplitude ordinates directly.
+ *
+ * The input must be the complete, uniformly spaced positive FFT half-spectrum
+ * (k = 1..N/2, including Nyquist). The original FFT-bin grid is retained.
+ */
+export function smoothFourierSpectrumParzen(
+  spectrum: FourierSpectrum,
+  options: ParzenOptions = {},
+): ParzenSmoothedFourierSpectrum {
+  const requestedBandwidth = options.bandwidthHz;
+  const bandwidthHz = requestedBandwidth === 0
+    ? 0
+    : Number.isFinite(requestedBandwidth) && (requestedBandwidth ?? 0) > 0
+      ? requestedBandwidth as number
+      : DEFAULT_PARZEN_BANDWIDTH_HZ;
+  const count = Math.min(spectrum.frequency.length, spectrum.amplitude.length);
+  const frequency = spectrum.frequency.slice(0, count);
+  const rawAmplitude = spectrum.amplitude.slice(0, count);
+  const fftBinSpacingHz = frequency[0] ?? 0;
+  const u = bandwidthHz > 0 ? 280 / (151 * bandwidthHz) : 0;
+  const firstZeroOffsetHz = u > 0 ? 2 / u : 0;
+  const dcAmplitude = Number.isFinite(options.dcAmplitude) && (options.dcAmplitude ?? 0) >= 0
+    ? options.dcAmplitude as number
+    : 0;
+
+  const baseSmoothing = {
+    method: 'Parzen' as const,
+    bandwidthHz,
+    bandwidthParameterUSeconds: u,
+    firstZeroOffsetHz,
+    fftBinSpacingHz,
+    binsPerBandwidth: fftBinSpacingHz > 0 ? bandwidthHz / fftBinSpacingHz : 0,
+    domain: 'squared-amplitude-power' as const,
+    amplitudeRecovery: 'square-root-after-power-smoothing' as const,
+    kernel: '3u/4 * [sin(pi*u*deltaF/2)/(pi*u*deltaF/2)]^4' as const,
+    kernelNormalization: 'unit-sum-on-two-sided-fft-grid' as const,
+    boundaryTreatment: 'circular-convolution-of-hermitian-two-sided-spectrum' as const,
+    outputGrid: 'original-positive-fft-bin-grid' as const,
+    dcAmplitude,
+  };
+
+  if (count === 0 || bandwidthHz === 0) {
+    const inputPower = dcAmplitude ** 2
+      + rawAmplitude.reduce((sum, value, index) => (
+        sum + (index === count - 1 ? 1 : 2) * (Number.isFinite(value) ? Math.max(0, value) ** 2 : 0)
+      ), 0);
+    return {
+      frequency,
+      amplitude: rawAmplitude,
+      unit: spectrum.unit,
+      smoothing: {
+        ...baseSmoothing,
+        applied: false,
+        smoothedDcAmplitude: dcAmplitude,
+        inputTwoSidedPowerSum: inputPower,
+        outputTwoSidedPowerSum: inputPower,
+        relativePowerConservationError: 0,
+      },
+    };
+  }
+
+  if (!(fftBinSpacingHz > 0)) {
+    throw new RangeError('Parzen smoothing requires positive, uniformly spaced FFT frequencies.');
+  }
+  for (let index = 0; index < count; index += 1) {
+    const expected = (index + 1) * fftBinSpacingHz;
+    const tolerance = Math.max(1e-12, Math.abs(expected) * 1e-8);
+    if (!Number.isFinite(frequency[index]) || Math.abs(frequency[index] - expected) > tolerance) {
+      throw new RangeError('Parzen smoothing requires the complete positive FFT-bin grid including Nyquist.');
+    }
+    if (!Number.isFinite(rawAmplitude[index]) || rawAmplitude[index] < 0) {
+      throw new RangeError('Parzen smoothing requires finite, non-negative amplitudes.');
+    }
+  }
+
+  const fftLength = count * 2;
+  if ((fftLength & (fftLength - 1)) !== 0) {
+    throw new RangeError('Parzen smoothing requires a power-of-two full FFT length.');
+  }
+
+  // Reconstruct the complete Hermitian power spectrum. The Nyquist bin occurs
+  // once; every other positive-frequency bin has a conjugate partner.
+  const twoSidedPower = Array(fftLength).fill(0);
+  twoSidedPower[0] = dcAmplitude ** 2;
+  for (let k = 1; k < count; k += 1) {
+    const power = rawAmplitude[k - 1] ** 2;
+    twoSidedPower[k] = power;
+    twoSidedPower[fftLength - k] = power;
+  }
+  twoSidedPower[count] = rawAmplitude[count - 1] ** 2;
+
+  // Sample the continuous window on the same periodic frequency grid and make
+  // the discrete weights sum exactly to one. Circular convolution then treats
+  // DC and Nyquist without truncating the window at either boundary.
+  const kernel = Array.from({ length: fftLength }, (_, index) => {
+    const signedBin = index <= count ? index : index - fftLength;
+    return parzenWindowWeight(signedBin * fftBinSpacingHz, bandwidthHz) * fftBinSpacingHz;
+  });
+  const kernelSum = kernel.reduce((sum, value) => sum + value, 0);
+  if (!(kernelSum > 0) || !Number.isFinite(kernelSum)) {
+    throw new RangeError('Parzen smoothing could not construct a finite spectral window.');
+  }
+  for (let index = 0; index < kernel.length; index += 1) kernel[index] /= kernelSum;
+
+  const powerFft = fftComplex(twoSidedPower);
+  const kernelFft = fftComplex(kernel);
+  const productRe = Array(fftLength).fill(0);
+  const productIm = Array(fftLength).fill(0);
+  for (let index = 0; index < fftLength; index += 1) {
+    productRe[index] = powerFft.re[index] * kernelFft.re[index]
+      - powerFft.im[index] * kernelFft.im[index];
+    productIm[index] = powerFft.re[index] * kernelFft.im[index]
+      + powerFft.im[index] * kernelFft.re[index];
+  }
+  const smoothedPower = fftComplex(productRe, productIm, true).re
+    .map((value) => Math.max(0, value));
+  const amplitude = Array.from({ length: count }, (_, index) => Math.sqrt(smoothedPower[index + 1]));
+  const inputTwoSidedPowerSum = twoSidedPowerSum(twoSidedPower);
+  const outputTwoSidedPowerSum = twoSidedPowerSum(smoothedPower);
+  const relativePowerConservationError = inputTwoSidedPowerSum > 0
+    ? Math.abs(outputTwoSidedPowerSum - inputTwoSidedPowerSum) / inputTwoSidedPowerSum
+    : 0;
+
+  return {
+    frequency,
+    amplitude,
+    unit: spectrum.unit,
+    smoothing: {
+      ...baseSmoothing,
+      applied: true,
+      smoothedDcAmplitude: Math.sqrt(smoothedPower[0]),
+      inputTwoSidedPowerSum,
+      outputTwoSidedPowerSum,
+      relativePowerConservationError,
+    },
+  };
 }
 
 /**
