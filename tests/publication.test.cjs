@@ -289,7 +289,14 @@ test('Fourier and response figures select one event-station record set at a time
   };
   assert.equal(recordSetOptionCount(fourierMarkup), 2);
   assert.equal(recordSetOptionCount(responseMarkup), 2);
-  assert.match(fourierMarkup, /data-export-base="fourier_acceleration_smoothed-raw_ko40_PLATE01"/);
+  assert.match(fourierMarkup, /data-export-base="fourier_acceleration_smoothed-raw_parzen0p10hz_taper5_journal_PLATE01"/);
+  assert.match(fourierMarkup, /Parzen · power-domain/);
+  assert.match(fourierMarkup, /Parzen B=0\.10 Hz on squared amplitude \(power\)/);
+  assert.match(fourierMarkup, /square-root amplitude recovery on the original FFT-bin grid/);
+  assert.match(fourierMarkup, /Konno–Ohmachi · log-frequency/);
+  assert.match(fourierMarkup, /strong-motion-fourier-spectrum\/1\.1/);
+  assert.match(fourierMarkup, /circular convolution of Hermitian two-sided spectrum/);
+  assert.match(fourierMarkup, /ordinate based on the smoothed peak minus four decades/);
   assert.match(responseMarkup, /data-export-base="response_spectrum_psv_equal_PLATE01"/);
 });
 
