@@ -1,21 +1,34 @@
-import { useId, useMemo, useRef, useState } from 'react';
+import { useId, useMemo, useRef, useState, type CSSProperties } from 'react';
 import {
+  computeDominantWaveletRidge,
   computeMorletWavelet,
   defaultWaveletOptions,
   MORLET_CWT_NORMALIZATION,
+  waveletMagnitudeToDecibels,
   type WaveletResult,
 } from '../analysis/wavelet';
+import { downloadFigureMetadata } from '../export/figureMetadata';
 import { downloadPng, downloadSvg } from '../export/exportImage';
 import type { DerivedWaveform, Quantity } from '../types/waveform';
 import { safeFileName } from '../utils/file';
 import { downsampleSegments } from '../visualization/downsample';
+import {
+  JOURNAL_DATA_LINE_PT,
+  JOURNAL_AXIS_FONT_PT,
+  JOURNAL_LINE_ART_DPI,
+  JOURNAL_MIN_LINE_PT,
+  JOURNAL_PANEL_FONT_PT,
+  pointsToUserUnits,
+} from '../visualization/journal';
+import { buildFigureProvenance, datasetLabel, preprocessingLabel } from '../visualization/provenance';
 
 interface WaveletPanelProps {
   waveforms: DerivedWaveform[];
 }
 
-type WaveletResolution = 'fast' | 'standard' | 'detailed';
+type WaveletResolution = 'fast' | 'standard' | 'detailed' | 'publication';
 type WaveletYAxis = 'frequency' | 'period';
+type WaveletColorMode = 'fixed-db' | 'record-percentile';
 
 interface DisplayGrid {
   columns: number;
@@ -24,13 +37,36 @@ interface DisplayGrid {
   colorMax: number;
 }
 
+interface ActiveColorScale {
+  mode: WaveletColorMode;
+  minimum: number;
+  maximum: number;
+  comparable: boolean;
+  label: string;
+  referenceNote?: string;
+  summary: string;
+  transform: (magnitude: number) => number;
+  ticks: Array<{ value: number; label: string }>;
+}
+
 const WIDTH = 980;
 const HEIGHT = 620;
-const MARGIN = { left: 78, right: 118, top: 40, bottom: 58 };
+const PRINT_WIDTH_MM = 180;
+const PANEL_FONT = pointsToUserUnits(JOURNAL_PANEL_FONT_PT, WIDTH, PRINT_WIDTH_MM);
+const AXIS_FONT = pointsToUserUnits(JOURNAL_AXIS_FONT_PT, WIDTH, PRINT_WIDTH_MM);
+const SMALL_FONT = pointsToUserUnits(8, WIDTH, PRINT_WIDTH_MM);
+const DATA_LINE = pointsToUserUnits(JOURNAL_DATA_LINE_PT, WIDTH, PRINT_WIDTH_MM);
+const AXIS_LINE = pointsToUserUnits(0.6, WIDTH, PRINT_WIDTH_MM);
+const GUIDE_LINE = pointsToUserUnits(JOURNAL_MIN_LINE_PT, WIDTH, PRINT_WIDTH_MM);
+const MARGIN = { left: 84, right: 154, top: 40, bottom: 58 };
 const WAVEFORM_TOP = 56;
 const WAVEFORM_HEIGHT = 132;
 const HEATMAP_TOP = 250;
 const HEATMAP_HEIGHT = 292;
+const COLORBAR_X = WIDTH - 90;
+const COLORBAR_WIDTH = 14;
+const COLORBAR_LABEL_X = COLORBAR_X - 18;
+const COLORBAR_TICK_X = COLORBAR_X + COLORBAR_WIDTH + 8;
 const COLOR_STOPS = [
   { t: 0, color: '#440154' },
   { t: 0.2, color: '#414487' },
@@ -40,10 +76,11 @@ const COLOR_STOPS = [
   { t: 1, color: '#FDE725' },
 ];
 
-const RESOLUTION_OPTIONS: Record<WaveletResolution, { label: string; frequencyCount: number; maxSamples: number }> = {
-  fast: { label: 'Fast', frequencyCount: 48, maxSamples: 4096 },
-  standard: { label: 'Standard', frequencyCount: 80, maxSamples: 6144 },
-  detailed: { label: 'Detailed', frequencyCount: 120, maxSamples: 8192 },
+const RESOLUTION_OPTIONS: Record<WaveletResolution, { label: string; frequencyCount: number; maxSamples: number; displayColumns: number }> = {
+  fast: { label: 'Fast', frequencyCount: 48, maxSamples: 4096, displayColumns: 360 },
+  standard: { label: 'Standard', frequencyCount: 96, maxSamples: 6144, displayColumns: 520 },
+  detailed: { label: 'Detailed', frequencyCount: 128, maxSamples: 8192, displayColumns: 640 },
+  publication: { label: 'Publication', frequencyCount: 160, maxSamples: 8192, displayColumns: 760 },
 };
 
 function quantityLabel(quantity: Quantity): string {
@@ -119,9 +156,11 @@ function interpolateColor(left: string, right: string, ratio: number): string {
   return `rgb(${values[0]}, ${values[1]}, ${values[2]})`;
 }
 
-function colorForValue(value: number, colorMin: number, colorMax: number): string {
-  if (!Number.isFinite(value) || value <= 0 || colorMin <= 0 || colorMax <= colorMin) return '#f2f2f2';
-  const t = Math.max(0, Math.min(1, (Math.log10(value) - Math.log10(colorMin)) / (Math.log10(colorMax) - Math.log10(colorMin))));
+function colorForValue(value: number, scale: ActiveColorScale): string {
+  if (!Number.isFinite(value)) return '#f2f2f2';
+  const transformed = scale.transform(value);
+  const rawPosition = (transformed - scale.minimum) / (scale.maximum - scale.minimum);
+  const t = Number.isFinite(rawPosition) ? Math.max(0, Math.min(1, rawPosition)) : 0;
   for (let i = 0; i < COLOR_STOPS.length - 1; i += 1) {
     const left = COLOR_STOPS[i];
     const right = COLOR_STOPS[i + 1];
@@ -172,6 +211,51 @@ function buildDisplayGrid(result: WaveletResult, maxColumns = 360): DisplayGrid 
   };
 }
 
+function buildActiveColorScale(
+  grid: DisplayGrid,
+  mode: WaveletColorMode,
+  dbMinimum: number,
+  dbMaximum: number,
+  dbReference: number,
+  unit: string,
+): ActiveColorScale {
+  if (mode === 'fixed-db') {
+    const safeMinimum = Number.isFinite(dbMinimum) ? dbMinimum : -60;
+    const requestedMaximum = Number.isFinite(dbMaximum) ? dbMaximum : 20;
+    const safeMaximum = requestedMaximum > safeMinimum ? requestedMaximum : safeMinimum + 10;
+    const safeReference = Number.isFinite(dbReference) && dbReference > 0 ? dbReference : 1;
+    const midpoint = (safeMinimum + safeMaximum) / 2;
+    return {
+      mode,
+      minimum: safeMinimum,
+      maximum: safeMaximum,
+      comparable: true,
+      label: 'CWT magnitude [dB]',
+      referenceNote: `re ${formatTick(safeReference)} ${unit}`,
+      summary: `Fixed ${formatTick(safeMinimum)} to ${formatTick(safeMaximum)} dB re ${formatTick(safeReference)} ${unit}; comparable only when unit, reference, frequency grid, resampling, CWT normalization, and preprocessing match.`,
+      transform: (magnitude) => waveletMagnitudeToDecibels(magnitude, safeReference),
+      ticks: [safeMinimum, midpoint, safeMaximum].map((value) => ({ value, label: `${formatTick(value)}` })),
+    };
+  }
+
+  const minimum = Math.log10(grid.colorMin);
+  const maximum = Math.log10(grid.colorMax);
+  const middle = Math.sqrt(grid.colorMin * grid.colorMax);
+  return {
+    mode,
+    minimum,
+    maximum,
+    comparable: false,
+    label: `CWT magnitude [${unit}]`,
+    summary: 'Record-specific 5th–98th percentile log10 range; colours are not comparable across records.',
+    transform: (magnitude) => magnitude > 0 ? Math.log10(magnitude) : Number.NEGATIVE_INFINITY,
+    ticks: [grid.colorMin, middle, grid.colorMax].map((value) => ({
+      value: Math.log10(value),
+      label: formatTick(value),
+    })),
+  };
+}
+
 function frequencyBoundaries(frequency: readonly number[]): number[] {
   if (frequency.length === 0) return [];
   if (frequency.length === 1) return [frequency[0] / Math.SQRT2, frequency[0] * Math.SQRT2];
@@ -195,6 +279,28 @@ function buildWaveformPath(time: readonly number[], values: readonly number[], x
   return parts.join(' ');
 }
 
+function buildRidgePath(
+  time: readonly number[],
+  frequency: readonly number[],
+  yAxis: WaveletYAxis,
+  xScale: (value: number) => number,
+  yScale: (value: number) => number,
+  maxPoints: number,
+): string {
+  const ordinate = frequency.map((value) => (
+    Number.isFinite(value) && value > 0
+      ? yAxis === 'frequency' ? value : 1 / value
+      : Number.NaN
+  ));
+  const parts: string[] = [];
+  downsampleSegments(time, ordinate, maxPoints).forEach((segment) => {
+    segment.x.forEach((timeValue, index) => {
+      parts.push(`${index === 0 ? 'M' : 'L'}${xScale(timeValue).toFixed(2)},${yScale(segment.y[index]).toFixed(2)}`);
+    });
+  });
+  return parts.join(' ');
+}
+
 export function WaveletPanel({ waveforms }: WaveletPanelProps): JSX.Element {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const reactId = useId().replace(/:/g, '');
@@ -202,12 +308,19 @@ export function WaveletPanel({ waveforms }: WaveletPanelProps): JSX.Element {
   const coiPatternId = `wavelet-coi-${reactId}`;
   const titleId = `wavelet-title-${reactId}`;
   const descriptionId = `wavelet-description-${reactId}`;
+  const colorNoteId = `wavelet-colour-note-${reactId}`;
   const [selectedWaveformId, setSelectedWaveformId] = useState('');
   const [quantity, setQuantity] = useState<Quantity>('acceleration');
   const [yAxis, setYAxis] = useState<WaveletYAxis>('frequency');
-  const [resolution, setResolution] = useState<WaveletResolution>('standard');
+  const [resolution, setResolution] = useState<WaveletResolution>('detailed');
   const [minFrequency, setMinFrequency] = useState(defaultWaveletOptions.minFrequency);
   const [maxFrequency, setMaxFrequency] = useState(defaultWaveletOptions.maxFrequency);
+  const [colorMode, setColorMode] = useState<WaveletColorMode>('fixed-db');
+  const [dbMinimum, setDbMinimum] = useState(-60);
+  const [dbMaximum, setDbMaximum] = useState(20);
+  const [dbReference, setDbReference] = useState(1);
+  const [showRidge, setShowRidge] = useState(false);
+  const [grayscale, setGrayscale] = useState(false);
 
   const selectedWaveform = useMemo(() => {
     if (waveforms.length === 0) return undefined;
@@ -227,7 +340,14 @@ export function WaveletPanel({ waveforms }: WaveletPanelProps): JSX.Element {
     });
   }, [maxFrequency, minFrequency, quantity, resolutionSettings.frequencyCount, resolutionSettings.maxSamples, selectedWaveform, values]);
 
-  const displayGrid = useMemo(() => (result ? buildDisplayGrid(result) : undefined), [result]);
+  const displayGrid = useMemo(() => (
+    result ? buildDisplayGrid(result, resolutionSettings.displayColumns) : undefined
+  ), [resolutionSettings.displayColumns, result]);
+  const dominantRidge = useMemo(() => (
+    result && showRidge
+      ? computeDominantWaveletRidge(result, { morletOmega0: defaultWaveletOptions.morletOmega0, excludeOutsideConeOfInfluence: true })
+      : undefined
+  ), [result, showRidge]);
 
   if (waveforms.length === 0) return <p className="empty-state">No data is available for wavelet analysis.</p>;
   if (!selectedWaveform || !result || !displayGrid || result.time.length === 0 || result.frequency.length === 0) {
@@ -238,14 +358,15 @@ export function WaveletPanel({ waveforms }: WaveletPanelProps): JSX.Element {
   const timeMin = result.time[0] ?? 0;
   const timeMax = result.time[result.time.length - 1] ?? 1;
   const xScale = (value: number): number => MARGIN.left + ((value - timeMin) / Math.max(timeMax - timeMin, Number.EPSILON)) * plotWidth;
-  const waveformValues = values.length === result.time.length
-    ? values
-    : result.time.map((_, index) => values[Math.min(values.length - 1, Math.round((index / Math.max(1, result.time.length - 1)) * (values.length - 1)))] ?? 0);
+  // Panel (a) retains the original samples and peak-preserving path decimation;
+  // only the CWT input is anti-alias resampled when its computation cap is hit.
+  const waveformValues = values;
+  const waveformTime = values.map((_, index) => index * selectedWaveform.dt);
   const finiteWaveValues = waveformValues.filter((value) => Number.isFinite(value));
   const waveAbsMax = Math.max(...finiteWaveValues.map((value) => Math.abs(value)), 1);
   const waveDomainMax = waveAbsMax * 1.08;
   const waveYScale = (value: number): number => WAVEFORM_TOP + WAVEFORM_HEIGHT / 2 - (value / waveDomainMax) * (WAVEFORM_HEIGHT / 2);
-  const waveformPath = buildWaveformPath(result.time, waveformValues, xScale, waveYScale);
+  const waveformPath = buildWaveformPath(waveformTime, waveformValues, xScale, waveYScale);
   const xTicks = niceTicks(timeMin, timeMax, 7);
   const waveYTicks = niceTicks(-waveDomainMax, waveDomainMax, 5);
   const boundaries = frequencyBoundaries(result.frequency);
@@ -257,11 +378,86 @@ export function WaveletPanel({ waveforms }: WaveletPanelProps): JSX.Element {
     - ((Math.log10(value) - Math.log10(yMin)) / (Math.log10(yMax) - Math.log10(yMin))) * HEATMAP_HEIGHT
   );
   const yTicks = logTicks(yMin, yMax);
-  const colorTicks = [displayGrid.colorMin, Math.sqrt(displayGrid.colorMin * displayGrid.colorMax), displayGrid.colorMax];
+  const colorScale = buildActiveColorScale(displayGrid, colorMode, dbMinimum, dbMaximum, dbReference, result.unit);
   const cellWidth = plotWidth / displayGrid.columns;
   const title = `Morlet Wavelet Scalogram: ${selectedWaveform.componentLabel} ${quantityLabel(quantity)}`;
   const fileNameBase = safeFileName(`wavelet_${selectedWaveform.componentLabel}_${quantity}`);
+  const colourScaleMethods = colorMode === 'fixed-db'
+    ? {
+      mode: 'fixed-db',
+      transform: '20*log10(magnitude/reference)',
+      boundsDb: [colorScale.minimum, colorScale.maximum],
+      reference: Number.isFinite(dbReference) && dbReference > 0 ? dbReference : 1,
+      referenceUnit: result.unit,
+      comparableAcrossRecords: true,
+      comparabilityCondition: 'same coefficient unit, reference, colour bounds, frequency grid, resampling, CWT normalization, and preprocessing',
+    }
+    : {
+      mode: 'record-percentile',
+      transform: 'log10(magnitude)',
+      percentileRange: [5, 98],
+      magnitudeBounds: [displayGrid.colorMin, displayGrid.colorMax],
+      magnitudeUnit: result.unit,
+      comparableAcrossRecords: false,
+    };
+  const waveletMethods = {
+    schema: 'strong-motion-wavelet-methods/1.0',
+    provenance: buildFigureProvenance([selectedWaveform]),
+    analysis: {
+      transform: 'Morlet continuous wavelet transform',
+      morletOmega0: defaultWaveletOptions.morletOmega0,
+      normalization: MORLET_CWT_NORMALIZATION,
+      inputQuantity: quantity,
+      inputUnit: result.inputUnit,
+      coefficientUnit: result.unit,
+      requestedFrequencyRangeHz: [minFrequency, maxFrequency],
+      realizedFrequencyRangeHz: [result.frequency[0], result.frequency[result.frequency.length - 1]],
+      logarithmicFrequencyCount: result.frequency.length,
+      inputSamples: result.inputSamples,
+      computedSamples: result.computedSamples,
+      effectiveDtSeconds: result.effectiveDt,
+      resampling: result.resampling,
+    },
+    colourScale: colourScaleMethods,
+    display: {
+      resolutionPreset: resolution,
+      displayedTimeBins: displayGrid.columns,
+      timeHistoryPanel: 'original samples with peak-preserving path decimation',
+      timeBinAggregation: {
+        method: 'arithmetic mean of coefficient magnitude in contiguous computed-time bins',
+        strideSamples: Math.max(1, Math.ceil(result.time.length / Math.min(result.time.length, resolutionSettings.displayColumns))),
+      },
+      yAxis,
+      coneOfInfluence: 'sqrt(2) * scale',
+      ridge: {
+        displayed: showRidge,
+        definition: 'per-time maximum CWT magnitude inside the cone of influence; values below the displayed colour floor are omitted',
+        interpretation: 'descriptive only; not a phase pick, modal estimate, or uncertainty interval',
+      },
+      finalWidthMm: PRINT_WIDTH_MM,
+      rasterDpi: JOURNAL_LINE_ART_DPI,
+    },
+  };
+  const preprocessingSummary = selectedWaveform.preprocessing
+    ? preprocessingLabel(selectedWaveform.preprocessing)
+    : 'exact preprocessing settings unavailable';
+  const dataSummary = datasetLabel([selectedWaveform]);
+  const resamplingSummary = result.resampling.applied
+    ? `Anti-alias resampling: ${result.resampling.method}, ${result.resampling.inputSamples.toLocaleString()} to ${result.resampling.computedSamples.toLocaleString()} samples, passband ≤ ${formatTick(result.resampling.passbandEndHz ?? 0)} Hz.`
+    : 'No time resampling was applied.';
   const timeSpan = Math.max(0, timeMax - timeMin);
+  const ridgePath = dominantRidge
+    ? buildRidgePath(
+      dominantRidge.time,
+      dominantRidge.frequency.map((frequency, index) => (
+        colorScale.transform(dominantRidge.amplitude[index]) >= colorScale.minimum ? frequency : Number.NaN
+      )),
+      yAxis,
+      xScale,
+      heatYScale,
+      displayGrid.columns,
+    )
+    : '';
   const coiPoints = result.frequency
     .map((frequency) => {
       const value = yAxis === 'frequency' ? frequency : 1 / frequency;
@@ -323,9 +519,36 @@ export function WaveletPanel({ waveforms }: WaveletPanelProps): JSX.Element {
           Resolution
           <select value={resolution} onChange={(event) => setResolution(event.target.value as WaveletResolution)}>
             {Object.entries(RESOLUTION_OPTIONS).map(([key, option]) => (
-              <option key={key} value={key}>{option.label}</option>
+              <option key={key} value={key}>{option.label} ({option.frequencyCount} frequencies)</option>
             ))}
           </select>
+        </label>
+        <label>
+          Colour Range
+          <select value={colorMode} aria-describedby={colorNoteId} onChange={(event) => setColorMode(event.target.value as WaveletColorMode)}>
+            <option value="fixed-db">Fixed dB (shared/comparable)</option>
+            <option value="record-percentile">Record percentile (not comparable)</option>
+          </select>
+        </label>
+        {colorMode === 'fixed-db' && (
+          <>
+            <label>
+              dB Minimum
+              <input type="number" step="5" value={dbMinimum} onChange={(event) => setDbMinimum(Number(event.target.value))} />
+            </label>
+            <label>
+              dB Maximum
+              <input type="number" step="5" value={dbMaximum} onChange={(event) => setDbMaximum(Number(event.target.value))} />
+            </label>
+            <label>
+              Reference [{result.unit}]
+              <input type="number" min="1e-15" step="any" value={dbReference} onChange={(event) => setDbReference(Number(event.target.value))} />
+            </label>
+          </>
+        )}
+        <label>
+          Descriptive Ridge
+          <input type="checkbox" checked={showRidge} onChange={(event) => setShowRidge(event.target.checked)} />
         </label>
         <label>
           Min Frequency [Hz]
@@ -335,23 +558,33 @@ export function WaveletPanel({ waveforms }: WaveletPanelProps): JSX.Element {
           Max Frequency [Hz]
           <input type="number" min="0.01" step="0.1" value={maxFrequency} onChange={(event) => setMaxFrequency(Number(event.target.value))} />
         </label>
+        <span id={colorNoteId} className="note">{colorScale.summary}</span>
       </div>
 
-      <figure className="chart-card publication-figure" tabIndex={0} aria-label={`${title} figure; horizontally scrollable on narrow screens`}>
-        <div className="chart-toolbar">
+      <figure className={`chart-card publication-figure journal-figure${grayscale ? ' grayscale-preview' : ''}`} tabIndex={0} aria-label={`${title} figure; horizontally scrollable on narrow screens`}>
+        <div className="chart-toolbar journal-toolbar">
           <div className="figure-toolbar-label">
-            <span className="figure-kicker">Publication figure</span>
-            <span className="note">Morlet ω₀ = 8 · {result.computedSamples.toLocaleString()} samples · {result.frequency.length} frequencies</span>
+            <span className="figure-kicker">Journal mixed artwork</span>
+            <strong>{title}</strong>
+            <span className="note">Morlet ω₀ = 8 · {result.computedSamples.toLocaleString()} samples · {result.frequency.length} frequencies · {displayGrid.columns} displayed time bins</span>
+            <span className="note">180 mm · 800 dpi · {colorScale.comparable ? 'shared dB range' : 'record-specific range'} · COI mask{showRidge ? ' · descriptive ridge' : ''}</span>
           </div>
           <div className="button-row compact">
-            <button type="button" className="secondary" aria-label={`Download ${title} as a self-contained SVG`} onClick={() => svgRef.current && downloadSvg(svgRef.current, `${fileNameBase}.svg`, { widthMm: 183 })}>SVG · vector</button>
-            <button type="button" className="secondary" aria-label={`Download ${title} as a 300 dpi PNG`} onClick={() => svgRef.current && void downloadPng(svgRef.current, `${fileNameBase}.png`, { dpi: 300, widthMm: 183 })}>PNG · 300 dpi</button>
+            <button type="button" className="secondary" aria-pressed={grayscale} onClick={() => setGrayscale((value) => !value)}>{grayscale ? 'Colour preview' : 'Grayscale check'}</button>
+            <button type="button" className="secondary" aria-label={`Download reproducible methods and provenance for ${title}`} onClick={() => downloadFigureMetadata(`${fileNameBase}_methods`, waveletMethods)}>Methods JSON</button>
+            <button type="button" className="secondary" aria-label={`Download ${title} as a portable SVG using system fonts`} onClick={() => svgRef.current && downloadSvg(svgRef.current, `${fileNameBase}.svg`, { widthMm: PRINT_WIDTH_MM })}>SVG · vector</button>
+            <button type="button" className="secondary" aria-label={`Download ${title} as an ${JOURNAL_LINE_ART_DPI} dpi PNG`} onClick={() => svgRef.current && void downloadPng(svgRef.current, `${fileNameBase}.png`, { dpi: JOURNAL_LINE_ART_DPI, widthMm: PRINT_WIDTH_MM })}>PNG · 800 dpi</button>
           </div>
         </div>
 
+        <span className="mobile-scroll-hint" aria-hidden="true">Swipe horizontally to inspect the full figure →</span>
         <svg
           ref={svgRef}
-          className="publication-chart"
+          className="publication-chart journal-chart"
+          style={{
+            '--journal-axis-font': `${AXIS_FONT}px`,
+            '--journal-supplemental-font': `${SMALL_FONT}px`,
+          } as CSSProperties}
           width={WIDTH}
           height={HEIGHT}
           viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
@@ -360,53 +593,44 @@ export function WaveletPanel({ waveforms }: WaveletPanelProps): JSX.Element {
           preserveAspectRatio="xMidYMid meet"
         >
           <title id={titleId}>{title}</title>
-          <desc id={descriptionId}>Morlet wavelet figure with a time history and log-scaled scalogram. Viridis colour encodes the 5th to 98th percentile of positive L2-normalized CWT coefficient magnitude in {result.unit}. Hatched areas fall outside the cone of influence.</desc>
-          <metadata>{JSON.stringify({
-            component: selectedWaveform.componentLabel,
-            sourceFile: selectedWaveform.fileName,
-            quantity,
-            morletOmega0: 8,
-            frequencyRangeHz: [result.frequency[0], result.frequency[result.frequency.length - 1]],
-            frequencyCount: result.frequency.length,
-            computedSamples: result.computedSamples,
-            colourScale: { transform: 'log10', lowerPercentile: 5, upperPercentile: 98 },
-            coneOfInfluence: 'sqrt(2) * scale',
-            cwtNormalization: MORLET_CWT_NORMALIZATION,
-            inputUnit: result.inputUnit,
-            coefficientUnit: result.unit,
-          })}</metadata>
+          <desc id={descriptionId}>Morlet wavelet figure with a time history and log-scaled scalogram. {colorScale.summary} Muted edge regions fall outside the cone of influence.{showRidge ? ' The thin ridge is the descriptive maximum-magnitude frequency above the displayed colour floor at each valid time and is not a phase pick or uncertainty estimate.' : ''}</desc>
+          <metadata>{JSON.stringify(waveletMethods)}</metadata>
           <defs>
             <linearGradient id={gradientId} x1="0" x2="0" y1="1" y2="0">
               {COLOR_STOPS.map((stop) => <stop key={stop.t} offset={`${stop.t * 100}%`} stopColor={stop.color} />)}
             </linearGradient>
-            <pattern id={coiPatternId} width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(35)">
-              <line x1="0" y1="0" x2="0" y2="8" stroke="#354651" strokeWidth="1.1" opacity="0.55" />
+            <pattern id={coiPatternId} width="14" height="14" patternUnits="userSpaceOnUse" patternTransform="rotate(35)">
+              <line x1="0" y1="0" x2="0" y2="14" stroke="#354651" strokeWidth={GUIDE_LINE} opacity="0.22" />
             </pattern>
           </defs>
           <rect x="0" y="0" width={WIDTH} height={HEIGHT} fill="#ffffff" />
-          <text x={WIDTH / 2} y="25" textAnchor="middle" className="chart-title">{title}</text>
 
           <g>
-            <text x={MARGIN.left} y={WAVEFORM_TOP - 8} className="wavelet-panel-label" fontSize="11.5" fontWeight="700" fill="#273640">(a) Time history</text>
-            <rect x={MARGIN.left} y={WAVEFORM_TOP} width={plotWidth} height={WAVEFORM_HEIGHT} fill="#ffffff" stroke="#64748b" strokeWidth="0.9" />
+            <text x={MARGIN.left} y={WAVEFORM_TOP - 10} className="wavelet-panel-label" fontSize={PANEL_FONT} fontWeight="700" fill="#111820">(a)</text>
+            <rect x={MARGIN.left} y={WAVEFORM_TOP} width={plotWidth} height={WAVEFORM_HEIGHT} fill="#ffffff" stroke="#3f474d" strokeWidth={AXIS_LINE} />
             {waveYTicks.map((tick) => {
               const y = waveYScale(tick);
               return (
                 <g key={`wave-y-${tick}`}>
-                  <line x1={MARGIN.left} y1={y} x2={MARGIN.left + plotWidth} y2={y} stroke="#e2e8f0" strokeWidth="0.8" />
+                  <line x1={MARGIN.left} y1={y} x2={MARGIN.left + plotWidth} y2={y} stroke="#d3d6d8" strokeWidth={GUIDE_LINE} opacity="0.62" />
                   <text x={MARGIN.left - 9} y={y + 4} textAnchor="end" className="tick-label">{formatTick(tick)}</text>
                 </g>
               );
             })}
-            <path d={waveformPath} fill="none" stroke="#1d4ed8" strokeWidth="1.15" vectorEffect="non-scaling-stroke" />
+            <path d={waveformPath} fill="none" stroke="#111820" strokeWidth={DATA_LINE} strokeLinecap="round" strokeLinejoin="round" />
             <text x="18" y={WAVEFORM_TOP + WAVEFORM_HEIGHT / 2} textAnchor="middle" className="axis-label" transform={`rotate(-90 18 ${WAVEFORM_TOP + WAVEFORM_HEIGHT / 2})`}>
               {quantityLabel(quantity)} [{unitForQuantity(quantity)}]
             </text>
           </g>
 
           <g>
-            <text x={MARGIN.left} y={HEATMAP_TOP - 8} className="wavelet-panel-label" fontSize="11.5" fontWeight="700" fill="#273640">(b) CWT magnitude</text>
-            <rect x={MARGIN.left} y={HEATMAP_TOP} width={plotWidth} height={HEATMAP_HEIGHT} fill="#ffffff" stroke="#64748b" strokeWidth="0.9" />
+            <text x={MARGIN.left} y={HEATMAP_TOP - 10} className="wavelet-panel-label" fontSize={PANEL_FONT} fontWeight="700" fill="#111820">(b)</text>
+            {leftCoiPath && (
+              <text x={MARGIN.left + plotWidth} y={HEATMAP_TOP - 10} textAnchor="end" fontSize={SMALL_FONT} fontWeight="400" fill="#334155">
+                Hatching: outside COI
+              </text>
+            )}
+            <rect x={MARGIN.left} y={HEATMAP_TOP} width={plotWidth} height={HEATMAP_HEIGHT} fill="#ffffff" stroke="#3f474d" strokeWidth={AXIS_LINE} />
             {displayGrid.values.map((row, frequencyIndex) => {
               const lowerFrequency = boundaries[frequencyIndex];
               const upperFrequency = boundaries[frequencyIndex + 1];
@@ -423,16 +647,22 @@ export function WaveletPanel({ waveforms }: WaveletPanelProps): JSX.Element {
                   y={y}
                   width={cellWidth + 0.4}
                   height={height}
-                  fill={colorForValue(value, displayGrid.colorMin, displayGrid.colorMax)}
+                  fill={colorForValue(value, colorScale)}
                 />
               ));
             })}
+
+            {ridgePath && (
+              <g aria-label="Descriptive per-time maximum CWT magnitude ridge inside the cone of influence">
+                <path d={ridgePath} fill="none" stroke="#17212b" strokeWidth={GUIDE_LINE} strokeDasharray="3 2" strokeLinecap="round" strokeLinejoin="round" opacity="0.72" />
+              </g>
+            )}
 
             {xTicks.map((tick) => {
               const x = xScale(tick);
               return (
                 <g key={`heat-x-${tick}`}>
-                  <line x1={x} y1={HEATMAP_TOP} x2={x} y2={HEATMAP_TOP + HEATMAP_HEIGHT} stroke="#e2e8f0" strokeWidth="0.8" />
+                  <line x1={x} y1={HEATMAP_TOP} x2={x} y2={HEATMAP_TOP + HEATMAP_HEIGHT} stroke="#ffffff" strokeWidth={GUIDE_LINE} opacity="0.38" />
                   <text x={x} y={HEATMAP_TOP + HEATMAP_HEIGHT + 20} textAnchor="middle" className="tick-label">{formatTick(tick)}</text>
                 </g>
               );
@@ -442,7 +672,7 @@ export function WaveletPanel({ waveforms }: WaveletPanelProps): JSX.Element {
               const y = heatYScale(tick);
               return (
                 <g key={`heat-y-${tick}`}>
-                  <line x1={MARGIN.left} y1={y} x2={MARGIN.left + plotWidth} y2={y} stroke="#e2e8f0" strokeWidth="0.8" />
+                  <line x1={MARGIN.left} y1={y} x2={MARGIN.left + plotWidth} y2={y} stroke="#ffffff" strokeWidth={GUIDE_LINE} opacity="0.38" />
                   <text x={MARGIN.left - 9} y={y + 4} textAnchor="end" className="tick-label">{formatTick(tick)}</text>
                 </g>
               );
@@ -450,16 +680,15 @@ export function WaveletPanel({ waveforms }: WaveletPanelProps): JSX.Element {
 
             {leftCoiPath && (
               <g aria-label="Cone of influence mask">
-                <path d={leftCoiPath} fill="#ffffff" opacity="0.46" />
-                <path d={rightCoiPath} fill="#ffffff" opacity="0.46" />
+                <path d={leftCoiPath} fill="#ffffff" opacity="0.36" />
+                <path d={rightCoiPath} fill="#ffffff" opacity="0.36" />
                 <path d={leftCoiPath} fill={`url(#${coiPatternId})`} />
                 <path d={rightCoiPath} fill={`url(#${coiPatternId})`} />
-                <path d={leftCoiBoundary} fill="none" stroke="#354651" strokeWidth="0.9" strokeDasharray="4 3" />
-                <path d={rightCoiBoundary} fill="none" stroke="#354651" strokeWidth="0.9" strokeDasharray="4 3" />
-                <text x={MARGIN.left + 8} y={HEATMAP_TOP + 16} fontSize="10" fontWeight="700" fill="#354651">outside COI</text>
+                <path d={leftCoiBoundary} fill="none" stroke="#354651" strokeWidth={GUIDE_LINE} strokeDasharray="4 4" opacity="0.55" />
+                <path d={rightCoiBoundary} fill="none" stroke="#354651" strokeWidth={GUIDE_LINE} strokeDasharray="4 4" opacity="0.55" />
               </g>
             )}
-            <rect x={MARGIN.left} y={HEATMAP_TOP} width={plotWidth} height={HEATMAP_HEIGHT} fill="none" stroke="#64748b" strokeWidth="0.9" />
+            <rect x={MARGIN.left} y={HEATMAP_TOP} width={plotWidth} height={HEATMAP_HEIGHT} fill="none" stroke="#3f474d" strokeWidth={AXIS_LINE} />
             <text x={MARGIN.left + plotWidth / 2} y={HEIGHT - 18} textAnchor="middle" className="axis-label">Time [s]</text>
             <text x="18" y={HEATMAP_TOP + HEATMAP_HEIGHT / 2} textAnchor="middle" className="axis-label" transform={`rotate(-90 18 ${HEATMAP_TOP + HEATMAP_HEIGHT / 2})`}>
               {yAxis === 'frequency' ? 'Frequency [Hz]' : 'Period [s]'}
@@ -467,22 +696,27 @@ export function WaveletPanel({ waveforms }: WaveletPanelProps): JSX.Element {
           </g>
 
           <g>
-            <rect x={WIDTH - 82} y={HEATMAP_TOP} width="16" height={HEATMAP_HEIGHT} fill={`url(#${gradientId})`} stroke="#64748b" strokeWidth="0.8" />
-            {colorTicks.map((tick) => {
-              const y = HEATMAP_TOP + HEATMAP_HEIGHT - ((Math.log10(tick) - Math.log10(displayGrid.colorMin)) / (Math.log10(displayGrid.colorMax) - Math.log10(displayGrid.colorMin))) * HEATMAP_HEIGHT;
+            {colorScale.referenceNote && (
+              <text x={COLORBAR_X + COLORBAR_WIDTH / 2} y={HEATMAP_TOP - 10} textAnchor="middle" fontSize={SMALL_FONT} fill="#334155">{colorScale.referenceNote}</text>
+            )}
+            <rect x={COLORBAR_X} y={HEATMAP_TOP} width={COLORBAR_WIDTH} height={HEATMAP_HEIGHT} fill={`url(#${gradientId})`} stroke="#64748b" strokeWidth={GUIDE_LINE} />
+            {colorScale.ticks.map((tick) => {
+              const y = HEATMAP_TOP + HEATMAP_HEIGHT - ((tick.value - colorScale.minimum) / (colorScale.maximum - colorScale.minimum)) * HEATMAP_HEIGHT;
               return (
-                <g key={`color-${tick}`}>
-                  <line x1={WIDTH - 66} y1={y} x2={WIDTH - 61} y2={y} stroke="#334155" strokeWidth="0.8" />
-                  <text x={WIDTH - 57} y={y + 4} className="tick-label">{formatTick(tick)}</text>
+                <g key={`color-${tick.value}`}>
+                  <line x1={COLORBAR_X + COLORBAR_WIDTH} y1={y} x2={COLORBAR_TICK_X - 3} y2={y} stroke="#334155" strokeWidth={GUIDE_LINE} />
+                  <text x={COLORBAR_TICK_X} y={y + 4} className="tick-label">{tick.label}</text>
                 </g>
               );
             })}
-            <text x={WIDTH - 24} y={HEATMAP_TOP + HEATMAP_HEIGHT / 2} textAnchor="middle" className="axis-label" transform={`rotate(-90 ${WIDTH - 24} ${HEATMAP_TOP + HEATMAP_HEIGHT / 2})`}>
-              CWT magnitude [{result.unit}]
+            <text x={COLORBAR_LABEL_X} y={HEATMAP_TOP + HEATMAP_HEIGHT / 2} textAnchor="middle" className="axis-label" transform={`rotate(-90 ${COLORBAR_LABEL_X} ${HEATMAP_TOP + HEATMAP_HEIGHT / 2})`}>
+              {colorScale.label}
             </text>
           </g>
         </svg>
-        <figcaption className="chart-caption">Viridis log colour scale spans the 5th–98th percentile of positive magnitude. The Morlet CWT uses L2 scale normalization (ψ<sub>s</sub> = ψ(t/s)/√s), so coefficient units are input units × √s ({result.unit}). Hatched regions are outside the cone of influence and should not be interpreted.</figcaption>
+        <figcaption className="chart-caption journal-caption">
+          Data: {dataSummary}. Preprocessing: {preprocessingSummary}. {resamplingSummary} {colorScale.summary} The Morlet CWT uses ω₀ = 8 and L2 scale normalization (ψ<sub>s</sub> = ψ(t/s)/√s), so coefficient units are input units × √s ({result.unit}). The transform used {result.computedSamples.toLocaleString()} samples at Δt = {formatTick(result.effectiveDt)} s and {result.frequency.length} logarithmically spaced frequencies from {formatTick(result.frequency[0])} to {formatTick(result.frequency[result.frequency.length - 1])} Hz. Displayed time bins are contiguous arithmetic means of coefficient magnitude. Muted regions are outside the cone of influence and should not be interpreted.{showRidge ? ' The thin line is the per-time maximum CWT magnitude inside the COI, with values below the displayed colour floor omitted; it is descriptive and is not a phase pick or uncertainty estimate.' : ''}
+        </figcaption>
       </figure>
     </div>
   );

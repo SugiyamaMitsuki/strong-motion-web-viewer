@@ -1,8 +1,18 @@
-import { useId, useMemo, useRef } from 'react';
+import { useId, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { downloadPng, downloadSvg } from '../export/exportImage';
+import { downloadFigureMetadata } from '../export/figureMetadata';
 import { safeFileName } from '../utils/file';
 import { publicationSeriesStyle, type PublicationSeriesStyle } from '../visualization/chartStyle';
 import { downsampleSegments } from '../visualization/downsample';
+import {
+  JOURNAL_AXIS_FONT_PT,
+  JOURNAL_DATA_LINE_PT,
+  JOURNAL_LINE_ART_DPI,
+  JOURNAL_MIN_LINE_PT,
+  JOURNAL_PANEL_FONT_PT,
+  JOURNAL_SUPPORT_FONT_PT,
+  pointsToUserUnits,
+} from '../visualization/journal';
 import { computePlotGeometry } from '../visualization/plotGeometry';
 
 type AxisScale = 'linear' | 'log';
@@ -13,6 +23,11 @@ export interface ChartSeries {
   x: number[];
   y: number[];
   style?: PublicationSeriesStyle;
+  /** Hide auxiliary/raw series from the compact journal legend. */
+  showInLegend?: boolean;
+  /** Optional final printed line width for reference/raw series. */
+  lineWidthPt?: number;
+  opacity?: number;
 }
 
 interface SvgChartProps {
@@ -32,8 +47,15 @@ interface SvgChartProps {
   annotations?: string[];
   description?: string;
   printWidthMm?: number;
+  rasterDpi?: number;
   showEndpoints?: boolean;
   equalAspect?: boolean;
+  showFigureTitle?: boolean;
+  panelLabel?: string;
+  showLegend?: boolean;
+  cornerNote?: string;
+  caption?: string;
+  metadata?: Record<string, unknown>;
 }
 
 interface Domain {
@@ -41,6 +63,12 @@ interface Domain {
   xMax: number;
   yMin: number;
   yMax: number;
+}
+
+interface TripartiteGuideLabel {
+  value: number;
+  x: number;
+  y: number;
 }
 
 function finitePositive(value: number): boolean {
@@ -69,7 +97,10 @@ function niceTicks(min: number, max: number, count = 5): number[] {
   const step = factor * power;
   const start = Math.ceil(min / step) * step;
   const ticks: number[] = [];
-  for (let value = start; value <= max + step * 0.5; value += step) ticks.push(Number(value.toPrecision(12)));
+  for (let value = start; value <= max + step * 0.5; value += step) {
+    const rounded = Number(value.toPrecision(12));
+    ticks.push(Math.abs(rounded) < step * 1e-10 ? 0 : rounded);
+  }
   return ticks;
 }
 
@@ -93,22 +124,26 @@ function isLogDecade(value: number): boolean {
   return Math.abs(value / (10 ** exponent) - 1) < 1e-9;
 }
 
-function logMinorValues(min: number, max: number): number[] {
-  if (!finitePositive(min) || !finitePositive(max)) return [];
-  const values: number[] = [];
-  const startExp = Math.floor(Math.log10(min));
-  const endExp = Math.ceil(Math.log10(max));
-  for (let exp = startExp; exp <= endExp; exp += 1) {
-    for (let multiplier = 1; multiplier < 10; multiplier += 1) {
-      const value = multiplier * 10 ** exp;
-      if (value >= min * 0.999 && value <= max * 1.001) values.push(value);
-    }
-  }
-  return values;
+function showLogTickLabel(value: number, min: number, max: number, availablePixels: number): boolean {
+  if (!finitePositive(value) || !finitePositive(min) || !finitePositive(max)) return false;
+  const spanDecades = Math.log10(max) - Math.log10(min);
+  if (spanDecades <= 3.2) return true;
+  if (!isLogDecade(value)) return false;
+  const firstExponent = Math.ceil(Math.log10(min));
+  const lastExponent = Math.floor(Math.log10(max));
+  const exponentCount = Math.max(1, lastExponent - firstExponent + 1);
+  const maximumLabels = Math.max(2, Math.floor(availablePixels / 42));
+  const stride = Math.max(1, Math.ceil(exponentCount / maximumLabels));
+  return (Math.round(Math.log10(value)) - firstExponent) % stride === 0;
 }
 
-function powerLabel(exponent: number): string {
-  return `10^${exponent}`;
+function logDecadeValues(min: number, max: number): number[] {
+  if (!finitePositive(min) || !finitePositive(max) || max < min) return [];
+  const values: number[] = [];
+  for (let exponent = Math.ceil(Math.log10(min)); exponent <= Math.floor(Math.log10(max)); exponent += 1) {
+    values.push(10 ** exponent);
+  }
+  return values;
 }
 
 function computeDomain(
@@ -170,14 +205,22 @@ export function SvgChart({
   domainX,
   domainY,
   tripartite = false,
-  showToolbarTitle = false,
+  showToolbarTitle = true,
   annotations = [],
   description,
-  printWidthMm = 183,
+  printWidthMm = 180,
+  rasterDpi = JOURNAL_LINE_ART_DPI,
   showEndpoints = false,
   equalAspect = false,
+  showFigureTitle = false,
+  panelLabel,
+  showLegend = true,
+  cornerNote,
+  caption,
+  metadata,
 }: SvgChartProps): JSX.Element {
   const svgRef = useRef<SVGSVGElement | null>(null);
+  const [grayscale, setGrayscale] = useState(false);
   const reactId = useId().replace(/:/g, '');
   const clipId = `plot-clip-${reactId}`;
   const titleId = `chart-title-${reactId}`;
@@ -188,12 +231,14 @@ export function SvgChart({
   );
 
   const visibleAnnotations = annotations;
-  const legendColumns = Math.max(1, Math.min(series.length, width >= 820 ? 4 : width >= 620 ? 3 : 2));
-  const legendRows = Math.max(1, Math.ceil(series.length / legendColumns));
+  const legendSeries = showLegend ? series.filter((entry) => entry.showInLegend !== false) : [];
+  const legendColumns = Math.max(1, Math.min(legendSeries.length || 1, width >= 820 ? 4 : width >= 620 ? 3 : 2));
+  const legendRows = legendSeries.length > 0 ? Math.ceil(legendSeries.length / legendColumns) : 0;
+  const legendTop = showFigureTitle ? 46 : panelLabel ? 36 : 22;
   const basePadding = {
     left: 82,
     right: 28,
-    top: 54 + legendRows * 19,
+    top: legendTop + legendRows * 22 + (legendRows > 0 ? 8 : 0),
     bottom: visibleAnnotations.length > 0 ? 92 + (visibleAnnotations.length - 1) * 17 : 66,
   };
   const geometry = computePlotGeometry(width, height, basePadding, equalAspect);
@@ -222,19 +267,11 @@ export function SvgChart({
   const xTicks = xScale === 'log' ? logTicks(domain.xMin, domain.xMax) : niceTicks(domain.xMin, domain.xMax, 7);
   const yTicks = yScale === 'log' ? logTicks(domain.yMin, domain.yMax) : niceTicks(domain.yMin, domain.yMax, 6);
   const showTripartite = tripartite && xScale === 'log' && yScale === 'log';
-  const tripartiteScaleValues = showTripartite ? logMinorValues(domain.yMin / 1000, domain.yMax * 1000) : [];
-  const tripartitePeriodValues = showTripartite ? logMinorValues(domain.xMin, domain.xMax) : [];
-  const accelerationLabelExponents = showTripartite
-    ? Array.from(
-      { length: Math.max(0, Math.ceil(Math.log10(domain.yMax)) + 2 - Math.floor(Math.log10(domain.yMin)) + 1) },
-      (_, index) => Math.floor(Math.log10(domain.yMin)) + index,
-    )
+  const accelerationGuides = showTripartite
+    ? logDecadeValues((2 * Math.PI * domain.yMin) / domain.xMax, (2 * Math.PI * domain.yMax) / domain.xMin)
     : [];
-  const displacementLabelExponents = showTripartite
-    ? Array.from(
-      { length: Math.max(0, Math.ceil(Math.log10(domain.yMax)) - 1 - (Math.floor(Math.log10(domain.yMin)) - 2) + 1) },
-      (_, index) => Math.floor(Math.log10(domain.yMin)) - 2 + index,
-    )
+  const displacementGuides = showTripartite
+    ? logDecadeValues((domain.yMin * domain.xMin) / (2 * Math.PI), (domain.yMax * domain.xMax) / (2 * Math.PI))
     : [];
 
   const guidePath = (points: Array<[number, number]>): string => points
@@ -244,6 +281,42 @@ export function SvgChart({
   const insideDomain = (x: number, y: number): boolean => (
     x >= domain.xMin && x <= domain.xMax && y >= domain.yMin && y <= domain.yMax
   );
+  const logXAtFraction = (fraction: number): number => (
+    10 ** (Math.log10(domain.xMin) + fraction * Math.log10(domain.xMax / domain.xMin))
+  );
+  const safeTripartiteLabels = (
+    values: readonly number[],
+    yFor: (value: number, x: number) => number,
+    fractions: readonly number[],
+  ): TripartiteGuideLabel[] => values.flatMap((value) => {
+    for (const fraction of fractions) {
+      const x = logXAtFraction(fraction);
+      const y = yFor(value, x);
+      if (!insideDomain(x, y)) continue;
+      const px = scaleX(x);
+      const py = scaleY(y);
+      if (
+        px >= padding.left + 44
+        && px <= padding.left + plotWidth - 44
+        && py >= padding.top + 22
+        && py <= plotBottom - 22
+      ) return [{ value, x: px, y: py }];
+    }
+    return [];
+  });
+  const accelerationLabels = showTripartite
+    ? safeTripartiteLabels(accelerationGuides, (value, x) => (value * x) / (2 * Math.PI), [0.2, 0.35, 0.5, 0.65, 0.8])
+    : [];
+  const unfilteredDisplacementLabels = showTripartite
+    ? safeTripartiteLabels(displacementGuides, (value, x) => (value * 2 * Math.PI) / x, [0.8, 0.65, 0.5, 0.35, 0.2])
+    : [];
+  const displacementLabels = unfilteredDisplacementLabels.filter((candidate) => (
+    !accelerationLabels.some((occupied) => {
+      const dx = candidate.x - occupied.x;
+      const dy = candidate.y - occupied.y;
+      return dx * dx + dy * dy < 72 * 72;
+    })
+  ));
 
   const paths = series.map((entry, seriesIndex) => {
     const parts: string[] = [];
@@ -266,15 +339,54 @@ export function SvgChart({
     const last = lastSegment && lastIndex >= 0
       ? { x: scaleX(lastSegment.x[lastIndex]), y: scaleY(lastSegment.y[lastIndex]) }
       : undefined;
-    return { id: entry.id, name: entry.name, d: parts.join(' '), style: entry.style ?? publicationSeriesStyle(seriesIndex), first, last };
+    return {
+      id: entry.id,
+      name: entry.name,
+      d: parts.join(' '),
+      style: entry.style ?? publicationSeriesStyle(seriesIndex),
+      first,
+      last,
+      opacity: entry.opacity,
+      lineWidthPt: entry.lineWidthPt,
+    };
   });
 
   const base = safeFileName(fileNameBase || title || 'chart');
+  const panelLabelFont = pointsToUserUnits(JOURNAL_PANEL_FONT_PT, width, printWidthMm);
+  const axisFont = pointsToUserUnits(JOURNAL_AXIS_FONT_PT, width, printWidthMm);
+  const supplementalFont = pointsToUserUnits(JOURNAL_SUPPORT_FONT_PT, width, printWidthMm);
+  const titleFont = pointsToUserUnits(12, width, printWidthMm);
+  const superscriptFont = pointsToUserUnits(7, width, printWidthMm);
+  const guideLine = pointsToUserUnits(JOURNAL_MIN_LINE_PT, width, printWidthMm);
+  const axisLine = pointsToUserUnits(0.6, width, printWidthMm);
+  const dataLine = pointsToUserUnits(JOURNAL_DATA_LINE_PT, width, printWidthMm);
+  const journalStyle = {
+    '--journal-axis-font': `${axisFont}px`,
+    '--journal-supplemental-font': `${supplementalFont}px`,
+    '--journal-title-font': `${titleFont}px`,
+    '--journal-guide-line': `${guideLine}px`,
+    '--journal-axis-line': `${axisLine}px`,
+    '--journal-data-line': `${dataLine}px`,
+  } as CSSProperties;
   const accessibleDescription = description
     ?? `${title}. X axis: ${xLabel}. Y axis: ${yLabel}. Series: ${series.map((entry) => entry.name).join(', ') || 'none'}.`;
+  const exportMetadata = {
+    schema: 'strong-motion-figure-export/1.0',
+    title,
+    description: accessibleDescription,
+    caption,
+    axes: { x: xLabel, y: yLabel, xScale, yScale },
+    domain,
+    equalAspect,
+    series: series.map((entry) => ({ name: entry.name, shownInLegend: entry.showInLegend !== false })),
+    intendedPrintWidthMm: printWidthMm,
+    pngDpi: rasterDpi,
+    annotations: visibleAnnotations,
+    analysis: metadata,
+  };
 
   return (
-    <figure className="chart-card publication-figure" tabIndex={0} aria-label={`${title} figure; horizontally scrollable on narrow screens`}>
+    <figure className={`chart-card publication-figure journal-figure${grayscale ? ' grayscale-preview' : ''}`} data-export-base={base} tabIndex={0} aria-label={`${title} figure; horizontally scrollable on narrow screens`}>
       <div className="chart-toolbar">
         <div className="figure-toolbar-label">
           <span className="figure-kicker">Publication figure</span>
@@ -284,7 +396,15 @@ export function SvgChart({
           <button
             type="button"
             className="secondary export-button"
-            aria-label={`Download ${title} as a self-contained SVG`}
+            aria-pressed={grayscale}
+            onClick={() => setGrayscale((value) => !value)}
+          >
+            {grayscale ? 'Colour preview' : 'Grayscale check'}
+          </button>
+          <button
+            type="button"
+            className="secondary export-button"
+            aria-label={`Download ${title} as a portable SVG using system fonts`}
             onClick={() => svgRef.current && downloadSvg(svgRef.current, `${base}.svg`, { widthMm: printWidthMm })}
           >
             SVG · vector
@@ -292,16 +412,28 @@ export function SvgChart({
           <button
             type="button"
             className="secondary export-button"
-            aria-label={`Download ${title} as a 300 dpi PNG`}
-            onClick={() => svgRef.current && void downloadPng(svgRef.current, `${base}.png`, { dpi: 300, widthMm: printWidthMm })}
+            aria-label={`Download ${title} as a ${rasterDpi} dpi PNG`}
+            onClick={() => svgRef.current && void downloadPng(svgRef.current, `${base}.png`, { dpi: rasterDpi, widthMm: printWidthMm })}
           >
-            PNG · 300 dpi
+            PNG · {rasterDpi} dpi
           </button>
+          {metadata && (
+            <button
+              type="button"
+              className="secondary export-button"
+              aria-label={`Download reproducibility metadata for ${title}`}
+              onClick={() => downloadFigureMetadata(base, exportMetadata)}
+            >
+              Methods · JSON
+            </button>
+          )}
         </div>
       </div>
+      <span className="mobile-scroll-hint" aria-hidden="true">Swipe horizontally to inspect the full figure →</span>
       <svg
         ref={svgRef}
         className="publication-chart"
+        style={journalStyle}
         width={width}
         height={height}
         viewBox={`0 0 ${width} ${height}`}
@@ -311,25 +443,20 @@ export function SvgChart({
       >
         <title id={titleId}>{title}</title>
         <desc id={descriptionId}>{accessibleDescription}</desc>
-        <metadata>{JSON.stringify({
-          title,
-          axes: { x: xLabel, y: yLabel, xScale, yScale },
-          domain,
-          equalAspect,
-          series: series.map((entry) => entry.name),
-          intendedPrintWidthMm: printWidthMm,
-          pngDpi: 300,
-        })}</metadata>
+        <metadata>{JSON.stringify(exportMetadata)}</metadata>
         <defs>
           <clipPath id={clipId}>
             <rect x={padding.left} y={padding.top} width={plotWidth} height={plotHeight} />
           </clipPath>
         </defs>
         <rect x="0" y="0" width={width} height={height} className="chart-background" />
-        <text x={width / 2} y="24" textAnchor="middle" className="chart-title">{title}</text>
+        {showFigureTitle && <text x={width / 2} y="24" textAnchor="middle" className="chart-title">{title}</text>}
+        {panelLabel && (
+          <text x={padding.left} y="24" className="journal-panel-label" fontSize={panelLabelFont} fontWeight="700">{panelLabel}</text>
+        )}
 
-        <g transform={`translate(${padding.left}, 46)`} aria-label="Legend">
-          {series.map((entry, index) => {
+        {legendSeries.length > 0 && <g transform={`translate(${padding.left}, ${legendTop})`} aria-label="Legend">
+          {legendSeries.map((entry, index) => {
             const row = Math.floor(index / legendColumns);
             const column = index % legendColumns;
             const columnWidth = plotWidth / legendColumns;
@@ -349,24 +476,41 @@ export function SvgChart({
               </g>
             );
           })}
-        </g>
+        </g>}
 
         {showTripartite && (
           <g clipPath={`url(#${clipId})`}>
-            {tripartiteScaleValues.map((value) => (
-              <g key={`trip-${value}`}>
-                <path d={guidePath([[domain.xMin, (value * domain.xMin) / (2 * Math.PI)], [domain.xMax, (value * domain.xMax) / (2 * Math.PI)]])} className="tripartite-grid-line" />
-                <path d={guidePath([[domain.xMin, (value * 2 * Math.PI) / domain.xMin], [domain.xMax, (value * 2 * Math.PI) / domain.xMax]])} className="tripartite-grid-line" />
-                <path d={guidePath([[domain.xMin, value], [domain.xMax, value]])} className="tripartite-grid-line" />
-              </g>
-            ))}
-            {tripartitePeriodValues.map((period) => (
+            {xTicks.map((period) => (
               <line
                 key={`trip-period-${period}`}
                 x1={scaleX(period)}
                 y1={padding.top}
                 x2={scaleX(period)}
                 y2={plotBottom}
+                className="tripartite-axis-grid"
+              />
+            ))}
+            {yTicks.map((velocity) => (
+              <line
+                key={`trip-velocity-${velocity}`}
+                x1={padding.left}
+                y1={scaleY(velocity)}
+                x2={padding.left + plotWidth}
+                y2={scaleY(velocity)}
+                className="tripartite-axis-grid"
+              />
+            ))}
+            {accelerationGuides.map((acceleration) => (
+              <path
+                key={`trip-acceleration-${acceleration}`}
+                d={guidePath([[domain.xMin, (acceleration * domain.xMin) / (2 * Math.PI)], [domain.xMax, (acceleration * domain.xMax) / (2 * Math.PI)]])}
+                className="tripartite-grid-line"
+              />
+            ))}
+            {displacementGuides.map((displacement) => (
+              <path
+                key={`trip-displacement-${displacement}`}
+                d={guidePath([[domain.xMin, (displacement * 2 * Math.PI) / domain.xMin], [domain.xMax, (displacement * 2 * Math.PI) / domain.xMax]])}
                 className="tripartite-grid-line"
               />
             ))}
@@ -375,37 +519,19 @@ export function SvgChart({
 
         {showTripartite && (
           <g>
-            {accelerationLabelExponents.map((exponent) => {
-              const acceleration = 10 ** exponent;
-              let x = domain.xMax;
-              let y = (acceleration * x) / (2 * Math.PI);
-              if (y > domain.yMax) {
-                y = domain.yMax / 1.08;
-                x = (2 * Math.PI * y) / acceleration;
-              }
-              if (!insideDomain(x, y)) return null;
-              const px = scaleX(x);
-              const py = scaleY(y);
+            {accelerationLabels.map((guide, guideIndex) => {
+              const exponent = Math.round(Math.log10(guide.value));
               return (
-                <text key={`acc-label-${exponent}`} x={px} y={py} className="tripartite-label" textAnchor="middle" transform={`rotate(-38 ${px} ${py})`}>
-                  {exponent === accelerationLabelExponents[accelerationLabelExponents.length - 1] ? `${powerLabel(exponent)} cm/s²` : powerLabel(exponent)}
+                <text key={`acc-label-${exponent}`} x={guide.x} y={guide.y} className="tripartite-label" textAnchor="middle" transform={`rotate(-38 ${guide.x} ${guide.y})`}>
+                  10<tspan baselineShift="super" fontSize={superscriptFont}>{exponent}</tspan>{guideIndex === Math.floor(accelerationLabels.length / 2) ? ' cm/s²' : ''}
                 </text>
               );
             })}
-            {displacementLabelExponents.map((exponent) => {
-              const displacement = 10 ** exponent;
-              let x = domain.xMin;
-              let y = (displacement * 2 * Math.PI) / x;
-              if (y > domain.yMax) {
-                y = domain.yMax / 1.06;
-                x = (2 * Math.PI * displacement) / y;
-              }
-              if (!insideDomain(x, y)) return null;
-              const px = scaleX(x);
-              const py = scaleY(y);
+            {displacementLabels.map((guide, guideIndex) => {
+              const exponent = Math.round(Math.log10(guide.value));
               return (
-                <text key={`disp-label-${exponent}`} x={px} y={py} className="tripartite-label" textAnchor="middle" transform={`rotate(38 ${px} ${py})`}>
-                  {exponent === displacementLabelExponents[displacementLabelExponents.length - 1] ? `${powerLabel(exponent)} cm` : powerLabel(exponent)}
+                <text key={`disp-label-${exponent}`} x={guide.x} y={guide.y} className="tripartite-label" textAnchor="middle" transform={`rotate(38 ${guide.x} ${guide.y})`}>
+                  10<tspan baselineShift="super" fontSize={superscriptFont}>{exponent}</tspan>{guideIndex === Math.floor(displacementLabels.length / 2) ? ' cm' : ''}
                 </text>
               );
             })}
@@ -415,11 +541,13 @@ export function SvgChart({
         {xTicks.map((tick) => {
           const x = scaleX(tick);
           const major = xScale === 'linear' || isLogDecade(tick);
+          const showGrid = xScale === 'linear' || Math.log10(domain.xMax / domain.xMin) <= 6 || major;
+          const showLabel = xScale === 'linear' || showLogTickLabel(tick, domain.xMin, domain.xMax, plotWidth);
           return (
             <g key={`x-${tick}`}>
-              {!showTripartite && <line x1={x} y1={padding.top} x2={x} y2={plotBottom} className={`grid-line ${major ? 'major' : 'minor'}`} />}
-              <line x1={x} y1={plotBottom} x2={x} y2={plotBottom + 5} className="axis-tick" />
-              <text x={x} y={plotBottom + 21} textAnchor="middle" className="tick-label">{formatTick(tick)}</text>
+              {!showTripartite && showGrid && <line x1={x} y1={padding.top} x2={x} y2={plotBottom} className={`grid-line ${major ? 'major' : 'minor'}`} />}
+              {showGrid && <line x1={x} y1={plotBottom} x2={x} y2={plotBottom + 5} className="axis-tick" />}
+              {showLabel && <text x={x} y={plotBottom + 21} textAnchor="middle" className="tick-label">{formatTick(tick)}</text>}
             </g>
           );
         })}
@@ -427,11 +555,13 @@ export function SvgChart({
           const y = scaleY(tick);
           const major = yScale === 'linear' || isLogDecade(tick);
           const zero = yScale === 'linear' && Math.abs(tick) < Number.EPSILON;
+          const showGrid = yScale === 'linear' || Math.log10(domain.yMax / domain.yMin) <= 6 || major;
+          const showLabel = yScale === 'linear' || showLogTickLabel(tick, domain.yMin, domain.yMax, plotHeight);
           return (
             <g key={`y-${tick}`}>
-              {!showTripartite && <line x1={padding.left} y1={y} x2={padding.left + plotWidth} y2={y} className={`grid-line ${major ? 'major' : 'minor'} ${zero ? 'zero' : ''}`} />}
-              <line x1={padding.left - 5} y1={y} x2={padding.left} y2={y} className="axis-tick" />
-              <text x={padding.left - 10} y={y + 4} textAnchor="end" className="tick-label">{formatTick(tick)}</text>
+              {!showTripartite && showGrid && <line x1={padding.left} y1={y} x2={padding.left + plotWidth} y2={y} className={`grid-line ${major ? 'major' : 'minor'} ${zero ? 'zero' : ''}`} />}
+              {showGrid && <line x1={padding.left - 5} y1={y} x2={padding.left} y2={y} className="axis-tick" />}
+              {showLabel && <text x={padding.left - 10} y={y + 4} textAnchor="end" className="tick-label">{formatTick(tick)}</text>}
             </g>
           );
         })}
@@ -445,6 +575,12 @@ export function SvgChart({
               className="series-line"
               stroke={path.style.color}
               strokeDasharray={path.style.dashArray}
+              style={{
+                strokeOpacity: path.opacity,
+                // Inline style intentionally overrides the shared CSS default;
+                // raw/reference traces can therefore retain their stated final-size width.
+                strokeWidth: path.lineWidthPt ? pointsToUserUnits(path.lineWidthPt, width, printWidthMm) : undefined,
+              }}
             />
           ))}
           {showEndpoints && paths.map((path, index) => (
@@ -454,6 +590,17 @@ export function SvgChart({
             </g>
           ))}
         </g>
+
+        {cornerNote && (
+          <text
+            x={padding.left + plotWidth - 8}
+            y={padding.top + supplementalFont + 5}
+            textAnchor="end"
+            className="chart-corner-note"
+          >
+            {cornerNote}
+          </text>
+        )}
 
         <text x={padding.left + plotWidth / 2} y={plotBottom + 48} textAnchor="middle" className="axis-label">{xLabel}</text>
         <text x="19" y={padding.top + plotHeight / 2} textAnchor="middle" className="axis-label" transform={`rotate(-90 19 ${padding.top + plotHeight / 2})`}>{yLabel}</text>
@@ -473,7 +620,7 @@ export function SvgChart({
         )}
       </svg>
       <figcaption className="chart-caption">
-        Self-contained vector SVG and {printWidthMm} mm-wide, 300 dpi PNG. Series use both colour and line pattern.
+        {caption ?? `Journal working size: ${printWidthMm} mm. Vector SVG and true-size ${rasterDpi} dpi PNG; series use both colour and line pattern.`}
       </figcaption>
     </figure>
   );

@@ -52,6 +52,7 @@ export function buildDerivedWaveform(record: WaveformRecord, settings: Preproces
     velocity,
     displacement,
     metadata: record.metadata,
+    preprocessing: { ...settings },
   };
 }
 

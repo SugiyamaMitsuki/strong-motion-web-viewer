@@ -307,6 +307,10 @@ button.danger:hover:not(:disabled) {
   font-size: 0.8rem;
 }
 
+.chart-toolbar .button-row {
+  flex-wrap: wrap;
+}
+
 .settings-panel {
   padding: 0;
 }
@@ -614,6 +618,24 @@ td.numeric {
   break-inside: avoid;
 }
 
+.mobile-scroll-hint {
+  display: none;
+}
+
+.journal-figure {
+  border-color: #b8c0c6;
+  border-radius: 4px;
+  box-shadow: none;
+}
+
+.journal-toolbar {
+  background: #ffffff;
+}
+
+.grayscale-preview .publication-chart {
+  filter: grayscale(1);
+}
+
 .chart-toolbar {
   min-height: 48px;
   border-bottom: 1px solid var(--border);
@@ -642,6 +664,14 @@ td.numeric {
   font-family: Arial, Helvetica, sans-serif;
 }
 
+.journal-chart {
+  background: #ffffff;
+}
+
+.journal-panel-label {
+  fill: #111820;
+}
+
 .chart-caption {
   border-top: 1px solid #e5e9ec;
   background: #fbfcfc;
@@ -656,49 +686,63 @@ td.numeric {
 
 .chart-title {
   fill: #111820;
-  font-size: 16px;
+  font-size: var(--journal-title-font, 16px);
   font-weight: 700;
 }
 
 .chart-annotation {
   fill: #34444f;
-  font-size: 11px;
+  font-size: var(--journal-supplemental-font, 11px);
   font-weight: 600;
+}
+
+.chart-corner-note {
+  fill: #25343d;
+  font-size: var(--journal-supplemental-font, 11px);
+  font-weight: 700;
+  paint-order: stroke;
+  stroke: #ffffff;
+  stroke-width: 4px;
+  stroke-linejoin: round;
 }
 
 .grid-line {
   stroke: #d9dee2;
-  stroke-width: 0.75;
+  stroke-width: var(--journal-guide-line, 0.9px);
   shape-rendering: crispEdges;
 }
 
 .grid-line.minor {
   stroke: #eceff1;
-  stroke-width: 0.55;
+  stroke-width: var(--journal-guide-line, 0.9px);
 }
 
 .grid-line.zero {
   stroke: #85929b;
-  stroke-width: 1;
+  stroke-width: var(--journal-axis-line, 1px);
 }
 
 .tripartite-grid-line {
   fill: none;
-  stroke: #b1bac1;
-  stroke-dasharray: 3 3;
-  stroke-width: 0.6;
-  vector-effect: non-scaling-stroke;
+  stroke: #aeb7bd;
+  stroke-dasharray: 5 4;
+  stroke-width: var(--journal-guide-line, 0.9px);
+}
+
+.tripartite-axis-grid {
+  stroke: #d9dee2;
+  stroke-width: var(--journal-guide-line, 0.9px);
 }
 
 .plot-border {
   fill: none;
   stroke: #394954;
-  stroke-width: 0.9;
+  stroke-width: var(--journal-axis-line, 1.1px);
 }
 
 .axis-tick {
   stroke: #394954;
-  stroke-width: 0.8;
+  stroke-width: var(--journal-axis-line, 0.9px);
 }
 
 .tick-label,
@@ -706,12 +750,12 @@ td.numeric {
 .legend-label,
 .tripartite-label {
   fill: #34444f;
-  font-size: 12px;
+  font-size: var(--journal-axis-font, 13px);
 }
 
 .tripartite-label {
   fill: #697781;
-  font-size: 9.5px;
+  font-size: var(--journal-supplemental-font, 9.5px);
 }
 
 .axis-label {
@@ -724,10 +768,19 @@ td.numeric {
 
 .series-line {
   fill: none;
-  stroke-width: 1.65;
+  stroke-width: var(--journal-data-line, 1.25px);
   stroke-linecap: round;
   stroke-linejoin: round;
-  vector-effect: non-scaling-stroke;
+}
+
+.journal-caption {
+  background: #ffffff;
+  color: #4c5962;
+}
+
+.warning-text {
+  color: #8a3b12;
+  font-weight: 700;
 }
 
 .summary-grid {
@@ -1227,11 +1280,34 @@ td.numeric {
   }
 
   .chart-caption {
-    display: none;
+    position: sticky;
+    left: 0;
+    display: block;
+    box-sizing: border-box;
+    width: min(100%, 680px);
+    padding: 8px 12px 10px;
+    font-size: 0.68rem;
+    line-height: 1.45;
   }
 
   .publication-figure {
     overflow-x: auto;
+  }
+
+  .mobile-scroll-hint {
+    position: sticky;
+    z-index: 2;
+    left: 0;
+    display: block;
+    box-sizing: border-box;
+    width: min(100%, 680px);
+    border-bottom: 1px solid #d5dde2;
+    background: #eef5f8;
+    color: #405663;
+    padding: 5px 12px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.01em;
   }
 
   .publication-figure .publication-chart {
@@ -1284,5 +1360,9 @@ td.numeric {
 
   .publication-chart {
     max-height: 255mm;
+  }
+
+  .mobile-scroll-hint {
+    display: none !important;
   }
 }
