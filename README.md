@@ -34,8 +34,9 @@ https://sugiyamamitsuki.github.io/strong-motion-web-viewer/
   - Acceleration
   - Velocity
   - Displacement
-  - Switchable overlay and separate NS/EW/UD component views
-  - Maximum absolute amplitude and occurrence time annotations
+  - Stacked journal panels or an overlaid screen-inspection view
+  - Event/station/channel selection prevents unrelated records from sharing an axis
+  - Shared ordinate, direct component labels, and PGA/PGV/PGD occurrence-time annotations
   - Peak-preserving display decimation and explicit breaks across missing samples
 - Particle orbit plots
   - EW-NS, EW-UD, and NS-UD projections
@@ -44,6 +45,9 @@ https://sugiyamamitsuki.github.io/strong-motion-web-viewer/
   - Different sampling intervals are resampled onto a shared time grid
   - Square plots with equal X/Y scale
 - Fourier amplitude spectra
+  - Logarithmic axes with a journal default spanning four decades below the peak
+  - Optional full-positive range for numerical-floor inspection
+  - Uses the conditioned waveform directly without applying a second hidden frequency taper
 - Morlet wavelet scalograms
   - Continuous wavelet transform with Morlet wavelet `omega0 = 8`
   - Frequency or period Y-axis display
@@ -51,7 +55,7 @@ https://sugiyamamitsuki.github.io/strong-motion-web-viewer/
   - Perceptually uniform Viridis colour scale with explicit 5th–98th percentile limits
   - Hatched Morlet cone-of-influence mask for edge-effect interpretation
   - L2-normalized coefficients are labelled with their dimensional unit (`input unit · √s`)
-  - Self-contained SVG and 300 dpi PNG export
+  - 180 mm SVG working export and 800 dpi PNG mixed-artwork export
 - Horizontal-to-vertical spectral ratio
   - Station/channel sets are separated by event identity so different earthquakes are never combined
   - Default horizontal combination follows the SESAME-style geometric mean: H/V = `sqrt(NS * EW) / UD`
@@ -90,15 +94,22 @@ https://sugiyamamitsuki.github.io/strong-motion-web-viewer/
   - Source latitude, source longitude, source depth, station latitude, and station longitude can be manually edited
   - Epicentral and hypocentral distances are calculated independently for each event/station pair
   - Source editing is disabled when multiple events are loaded to prevent an accidental global overwrite
+- Journal figures
+  - Compact 180 mm manuscript plate combining stacked acceleration histories and the selected-damping Sa spectrum
+  - Final-size 7–12 pt typography, 0.5 pt minimum guides, 0.8 pt data traces, and lowercase panel labels
+  - Titles and explanatory captions stay outside the SVG artwork
+  - Grayscale preview; colour series also use independent dash patterns
+  - 800 dpi PNG export with physical-resolution metadata and editable SVG working export
 - Report overview figure
-  - Combines record metadata, latitude/longitude, distances, ground motion strength, stacked acceleration/velocity waveforms, and tripartite response spectrum in an A4 portrait report-ready figure
+  - Combines record metadata, latitude/longitude, distances, ground motion strength, stacked acceleration/velocity waveforms, and tripartite response spectrum in a separate A4 analysis-overview figure
   - Separates events and KiK-net channel suffixes before analysis
   - Uses a shared ordinate; parseable record timestamps are aligned to the earliest start, otherwise the component-relative time reference is stated explicitly
   - Exports an editable SVG or exact A4-width 300 dpi PNG with embedded resolution metadata
 - Figure export
-  - Self-contained SVG with physical millimetre dimensions, inlined presentation styles, and embedded method metadata
-  - 183 mm-wide 300 dpi PNG for charts and 210 mm-wide 300 dpi PNG for the A4 report
+  - SVG working files with 180 mm physical dimensions, inlined presentation styles, and embedded method metadata
+  - 180 mm-wide 800 dpi PNG for journal charts and 210 mm-wide 300 dpi PNG for the separate A4 overview report
   - Colourblind-safe component palette with independent dash patterns for greyscale reproduction
+  - SVG uses system Arial/Helvetica fonts; convert text to outlines or embed fonts when preparing a journal's final PDF/EPS/TIFF submission file
 - Data export
   - Time-history CSV
   - Distance CSV
@@ -163,6 +174,7 @@ If no time column is available, the app uses the default CSV sampling frequency 
 - The waveform quantity type, such as acceleration, velocity, or displacement, cannot always be detected automatically when CSV headers are missing. Use the record table to correct it manually.
 - Integration results depend on preprocessing, mean removal, and drift correction settings. For research or professional use, compare the results with trusted reference data.
 - JMA seismic intensity is calculated only when three-component data are available. The current implementation uses a browser-side FFT implementation. Verification against official or trusted datasets is recommended before formal use.
+- Figure sizing, line-weight, typography, grayscale, and export acceptance criteria are documented in [`docs/JOURNAL_FIGURE_STANDARD.md`](docs/JOURNAL_FIGURE_STANDARD.md).
 
 ## Main Files
 
@@ -183,10 +195,14 @@ src/components/LocationDistancePanel.tsx    Location input and distance display
 src/components/ManualFormatImportPanel.tsx  UI for unknown text formats
 src/components/ParticleOrbitPanel.tsx       Particle orbit view
 src/components/WaveletPanel.tsx             Wavelet scalogram view
+src/components/JournalPlatePanel.tsx        Compact manuscript composite
+src/components/StackedTimeHistoryFigure.tsx Final-size stacked waveform figure
 src/components/ReportFigurePanel.tsx        Report-ready overview figure
 src/components/StationMap.tsx               Station map
 src/components/SvgChart.tsx                 SVG chart and PNG/SVG export
 src/visualization/chartStyle.ts             Publication palette and line-pattern mapping
 src/visualization/downsample.ts              Peak-preserving, gap-aware figure decimation
+src/visualization/journal.ts                 Physical-size, typography, and raster presets
+src/visualization/waveformGroups.ts          Event/station/channel grouping and time alignment
 src/export/                                 CSV/JSON/ZIP export
 ```

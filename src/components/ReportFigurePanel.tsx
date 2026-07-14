@@ -727,11 +727,11 @@ export function ReportFigurePanel({ waveforms, jmaWaveforms, peaks, responseSett
       <figure className="chart-card publication-figure report-figure" tabIndex={0} aria-label="A4 strong-motion report figure; horizontally scrollable on narrow screens">
         <div className="chart-toolbar">
           <div className="figure-toolbar-label">
-            <span className="figure-kicker">A4 publication report</span>
+            <span className="figure-kicker">A4 analysis overview</span>
             <span className="note">210 × 297 mm · editable vector or 300 dpi raster</span>
           </div>
           <div className="button-row compact">
-            <button type="button" className="secondary" aria-label="Download strong-motion A4 report as a self-contained SVG" onClick={() => svgRef.current && downloadSvg(svgRef.current, `${fileNameBase}.svg`, { widthMm: 210, heightMm: 297 })}>SVG · vector</button>
+            <button type="button" className="secondary" aria-label="Download strong-motion A4 report as a portable SVG using system fonts" onClick={() => svgRef.current && downloadSvg(svgRef.current, `${fileNameBase}.svg`, { widthMm: 210, heightMm: 297 })}>SVG · vector</button>
             <button type="button" className="secondary" aria-label="Download strong-motion A4 report as a 300 dpi PNG" onClick={() => svgRef.current && void downloadPng(svgRef.current, `${fileNameBase}.png`, { dpi: 300, widthMm: 210 })}>PNG · 300 dpi</button>
           </div>
         </div>

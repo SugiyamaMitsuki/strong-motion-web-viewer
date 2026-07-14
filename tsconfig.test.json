@@ -27,6 +27,8 @@
     "src/export/exportImage.ts",
     "src/utils/file.ts",
     "src/visualization/downsample.ts",
+    "src/visualization/journal.ts",
+    "src/visualization/waveformGroups.ts",
     "src/visualization/plotGeometry.ts",
     "src/types/waveform.ts"
   ]

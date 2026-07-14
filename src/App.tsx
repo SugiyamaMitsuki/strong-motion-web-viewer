@@ -6,6 +6,7 @@ import { DropZone } from './components/DropZone';
 import { ExportPanel } from './components/ExportPanel';
 import { FourierPanel } from './components/FourierPanel';
 import { HorizontalVerticalRatioPanel } from './components/HorizontalVerticalRatioPanel';
+import { JournalPlatePanel } from './components/JournalPlatePanel';
 import { ManualFormatImportPanel, type PendingManualFormatFile } from './components/ManualFormatImportPanel';
 import { ParticleOrbitPanel } from './components/ParticleOrbitPanel';
 import { RecordTable } from './components/RecordTable';
@@ -20,9 +21,9 @@ import type { AppSettings, WaveformRecord } from './types/waveform';
 import { isSupportedWaveformFileName, makeId, readFileAsText } from './utils/file';
 import './styles.css';
 
-type TabKey = 'summary' | 'time' | 'orbit' | 'fourier' | 'wavelet' | 'hvsr' | 'response' | 'report' | 'export';
+type TabKey = 'summary' | 'time' | 'orbit' | 'fourier' | 'wavelet' | 'hvsr' | 'response' | 'journal' | 'report' | 'export';
 
-const ANALYSIS_TABS: readonly TabKey[] = ['summary', 'time', 'orbit', 'fourier', 'wavelet', 'hvsr', 'response', 'report', 'export'];
+const ANALYSIS_TABS: readonly TabKey[] = ['summary', 'time', 'orbit', 'fourier', 'wavelet', 'hvsr', 'response', 'journal', 'report', 'export'];
 
 const defaultSettings: AppSettings = {
   csv: {
@@ -65,7 +66,8 @@ function tabLabel(tab: TabKey): string {
     case 'wavelet': return 'Wavelet';
     case 'hvsr': return 'H/V Ratio';
     case 'response': return 'Response Spectrum';
-    case 'report': return 'Report Figure';
+    case 'journal': return 'Journal Plate';
+    case 'report': return 'Overview Report';
     case 'export': return 'Export';
   }
 }
@@ -254,7 +256,7 @@ export default function App(): JSX.Element {
           <ol className="workflow-strip" aria-label="Analysis workflow">
             <li><span>01</span><strong>Load</strong><small>Waveform files stay local</small></li>
             <li><span>02</span><strong>Condition</strong><small>Review processing settings</small></li>
-            <li><span>03</span><strong>Analyze &amp; export</strong><small>Publication-ready SVG / PNG</small></li>
+            <li><span>03</span><strong>Analyze &amp; export</strong><small>Journal-layout SVG / 800 dpi PNG</small></li>
           </ol>
 
           <DropZone onFiles={(files) => void parseFiles(files)} loading={loading} />
@@ -289,7 +291,7 @@ export default function App(): JSX.Element {
             <section className="panel analysis-empty" aria-labelledby="analysis-empty-title">
               <span className="section-number">03</span>
               <h2 id="analysis-empty-title">Analysis workspace</h2>
-              <p>Load a waveform set to activate time histories, spectra, H/V ratios, wavelets, orbits, and the A4 report figure.</p>
+              <p>Load a waveform set to activate time histories, spectra, H/V ratios, wavelets, orbits, and the manuscript composite.</p>
               <button type="button" className="secondary" onClick={() => void loadSample()} disabled={loading}>Use the real K-NET sample</button>
             </section>
           ) : (
@@ -298,7 +300,7 @@ export default function App(): JSX.Element {
                 <div>
                   <span className="section-number">03</span>
                   <h2 id="analysis-title">Analysis workspace</h2>
-                  <p className="note">Figures share a colourblind-safe palette, independent line patterns, and self-contained exports.</p>
+                  <p className="note">Journal figures use final-size typography, colourblind-safe hues, independent line patterns, and grayscale preview.</p>
                 </div>
                 <dl className="dataset-context" aria-label="Active dataset">
                   <div><dt>Station</dt><dd>{stationSummary}</dd></div>
@@ -341,14 +343,8 @@ export default function App(): JSX.Element {
                 {activeTab === 'wavelet' && <WaveletPanel waveforms={derivedWaveforms} />}
                 {activeTab === 'hvsr' && <HorizontalVerticalRatioPanel waveforms={derivedWaveforms} />}
                 {activeTab === 'response' && <ResponseSpectrumPanel waveforms={derivedWaveforms} settings={settings.responseSpectrum} />}
-                {activeTab === 'report' && (
-                  <ReportFigurePanel
-                    waveforms={derivedWaveforms}
-                    jmaWaveforms={jmaWaveforms}
-                    peaks={peaks}
-                    responseSettings={settings.responseSpectrum}
-                  />
-                )}
+                {activeTab === 'journal' && <JournalPlatePanel waveforms={derivedWaveforms} responseSettings={settings.responseSpectrum} />}
+                {activeTab === 'report' && <ReportFigurePanel waveforms={derivedWaveforms} jmaWaveforms={jmaWaveforms} peaks={peaks} responseSettings={settings.responseSpectrum} />}
                 {activeTab === 'export' && (
                   <ExportPanel
                     waveforms={derivedWaveforms}

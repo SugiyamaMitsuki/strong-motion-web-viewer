@@ -1,4 +1,4 @@
-import { useId, useMemo, useRef, useState } from 'react';
+import { useId, useMemo, useRef, useState, type CSSProperties } from 'react';
 import {
   computeMorletWavelet,
   defaultWaveletOptions,
@@ -9,6 +9,14 @@ import { downloadPng, downloadSvg } from '../export/exportImage';
 import type { DerivedWaveform, Quantity } from '../types/waveform';
 import { safeFileName } from '../utils/file';
 import { downsampleSegments } from '../visualization/downsample';
+import {
+  JOURNAL_DATA_LINE_PT,
+  JOURNAL_AXIS_FONT_PT,
+  JOURNAL_LINE_ART_DPI,
+  JOURNAL_MIN_LINE_PT,
+  JOURNAL_PANEL_FONT_PT,
+  pointsToUserUnits,
+} from '../visualization/journal';
 
 interface WaveletPanelProps {
   waveforms: DerivedWaveform[];
@@ -26,6 +34,13 @@ interface DisplayGrid {
 
 const WIDTH = 980;
 const HEIGHT = 620;
+const PRINT_WIDTH_MM = 180;
+const PANEL_FONT = pointsToUserUnits(JOURNAL_PANEL_FONT_PT, WIDTH, PRINT_WIDTH_MM);
+const AXIS_FONT = pointsToUserUnits(JOURNAL_AXIS_FONT_PT, WIDTH, PRINT_WIDTH_MM);
+const SMALL_FONT = pointsToUserUnits(7, WIDTH, PRINT_WIDTH_MM);
+const DATA_LINE = pointsToUserUnits(JOURNAL_DATA_LINE_PT, WIDTH, PRINT_WIDTH_MM);
+const AXIS_LINE = pointsToUserUnits(0.6, WIDTH, PRINT_WIDTH_MM);
+const GUIDE_LINE = pointsToUserUnits(JOURNAL_MIN_LINE_PT, WIDTH, PRINT_WIDTH_MM);
 const MARGIN = { left: 78, right: 118, top: 40, bottom: 58 };
 const WAVEFORM_TOP = 56;
 const WAVEFORM_HEIGHT = 132;
@@ -208,6 +223,7 @@ export function WaveletPanel({ waveforms }: WaveletPanelProps): JSX.Element {
   const [resolution, setResolution] = useState<WaveletResolution>('standard');
   const [minFrequency, setMinFrequency] = useState(defaultWaveletOptions.minFrequency);
   const [maxFrequency, setMaxFrequency] = useState(defaultWaveletOptions.maxFrequency);
+  const [grayscale, setGrayscale] = useState(false);
 
   const selectedWaveform = useMemo(() => {
     if (waveforms.length === 0) return undefined;
@@ -337,21 +353,28 @@ export function WaveletPanel({ waveforms }: WaveletPanelProps): JSX.Element {
         </label>
       </div>
 
-      <figure className="chart-card publication-figure" tabIndex={0} aria-label={`${title} figure; horizontally scrollable on narrow screens`}>
-        <div className="chart-toolbar">
+      <figure className={`chart-card publication-figure journal-figure${grayscale ? ' grayscale-preview' : ''}`} tabIndex={0} aria-label={`${title} figure; horizontally scrollable on narrow screens`}>
+        <div className="chart-toolbar journal-toolbar">
           <div className="figure-toolbar-label">
-            <span className="figure-kicker">Publication figure</span>
+            <span className="figure-kicker">Journal mixed artwork</span>
+            <strong>{title}</strong>
             <span className="note">Morlet ω₀ = 8 · {result.computedSamples.toLocaleString()} samples · {result.frequency.length} frequencies</span>
+            <span className="note">180 mm · 800 dpi · log colour normalization · cone-of-influence mask</span>
           </div>
           <div className="button-row compact">
-            <button type="button" className="secondary" aria-label={`Download ${title} as a self-contained SVG`} onClick={() => svgRef.current && downloadSvg(svgRef.current, `${fileNameBase}.svg`, { widthMm: 183 })}>SVG · vector</button>
-            <button type="button" className="secondary" aria-label={`Download ${title} as a 300 dpi PNG`} onClick={() => svgRef.current && void downloadPng(svgRef.current, `${fileNameBase}.png`, { dpi: 300, widthMm: 183 })}>PNG · 300 dpi</button>
+            <button type="button" className="secondary" aria-pressed={grayscale} onClick={() => setGrayscale((value) => !value)}>{grayscale ? 'Colour preview' : 'Grayscale check'}</button>
+            <button type="button" className="secondary" aria-label={`Download ${title} as a portable SVG using system fonts`} onClick={() => svgRef.current && downloadSvg(svgRef.current, `${fileNameBase}.svg`, { widthMm: PRINT_WIDTH_MM })}>SVG · vector</button>
+            <button type="button" className="secondary" aria-label={`Download ${title} as an ${JOURNAL_LINE_ART_DPI} dpi PNG`} onClick={() => svgRef.current && void downloadPng(svgRef.current, `${fileNameBase}.png`, { dpi: JOURNAL_LINE_ART_DPI, widthMm: PRINT_WIDTH_MM })}>PNG · 800 dpi</button>
           </div>
         </div>
 
         <svg
           ref={svgRef}
-          className="publication-chart"
+          className="publication-chart journal-chart"
+          style={{
+            '--journal-axis-font': `${AXIS_FONT}px`,
+            '--journal-supplemental-font': `${SMALL_FONT}px`,
+          } as CSSProperties}
           width={WIDTH}
           height={HEIGHT}
           viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
@@ -374,6 +397,8 @@ export function WaveletPanel({ waveforms }: WaveletPanelProps): JSX.Element {
             cwtNormalization: MORLET_CWT_NORMALIZATION,
             inputUnit: result.inputUnit,
             coefficientUnit: result.unit,
+            finalWidthMm: PRINT_WIDTH_MM,
+            rasterDpi: JOURNAL_LINE_ART_DPI,
           })}</metadata>
           <defs>
             <linearGradient id={gradientId} x1="0" x2="0" y1="1" y2="0">
@@ -384,29 +409,28 @@ export function WaveletPanel({ waveforms }: WaveletPanelProps): JSX.Element {
             </pattern>
           </defs>
           <rect x="0" y="0" width={WIDTH} height={HEIGHT} fill="#ffffff" />
-          <text x={WIDTH / 2} y="25" textAnchor="middle" className="chart-title">{title}</text>
 
           <g>
-            <text x={MARGIN.left} y={WAVEFORM_TOP - 8} className="wavelet-panel-label" fontSize="11.5" fontWeight="700" fill="#273640">(a) Time history</text>
-            <rect x={MARGIN.left} y={WAVEFORM_TOP} width={plotWidth} height={WAVEFORM_HEIGHT} fill="#ffffff" stroke="#64748b" strokeWidth="0.9" />
+            <text x={MARGIN.left} y={WAVEFORM_TOP - 10} className="wavelet-panel-label" fontSize={PANEL_FONT} fontWeight="700" fill="#111820">(a) Time history</text>
+            <rect x={MARGIN.left} y={WAVEFORM_TOP} width={plotWidth} height={WAVEFORM_HEIGHT} fill="#ffffff" stroke="#3f474d" strokeWidth={AXIS_LINE} />
             {waveYTicks.map((tick) => {
               const y = waveYScale(tick);
               return (
                 <g key={`wave-y-${tick}`}>
-                  <line x1={MARGIN.left} y1={y} x2={MARGIN.left + plotWidth} y2={y} stroke="#e2e8f0" strokeWidth="0.8" />
+                  <line x1={MARGIN.left} y1={y} x2={MARGIN.left + plotWidth} y2={y} stroke="#d3d6d8" strokeWidth={GUIDE_LINE} />
                   <text x={MARGIN.left - 9} y={y + 4} textAnchor="end" className="tick-label">{formatTick(tick)}</text>
                 </g>
               );
             })}
-            <path d={waveformPath} fill="none" stroke="#1d4ed8" strokeWidth="1.15" vectorEffect="non-scaling-stroke" />
+            <path d={waveformPath} fill="none" stroke="#111820" strokeWidth={DATA_LINE} strokeLinecap="round" strokeLinejoin="round" />
             <text x="18" y={WAVEFORM_TOP + WAVEFORM_HEIGHT / 2} textAnchor="middle" className="axis-label" transform={`rotate(-90 18 ${WAVEFORM_TOP + WAVEFORM_HEIGHT / 2})`}>
               {quantityLabel(quantity)} [{unitForQuantity(quantity)}]
             </text>
           </g>
 
           <g>
-            <text x={MARGIN.left} y={HEATMAP_TOP - 8} className="wavelet-panel-label" fontSize="11.5" fontWeight="700" fill="#273640">(b) CWT magnitude</text>
-            <rect x={MARGIN.left} y={HEATMAP_TOP} width={plotWidth} height={HEATMAP_HEIGHT} fill="#ffffff" stroke="#64748b" strokeWidth="0.9" />
+            <text x={MARGIN.left} y={HEATMAP_TOP - 10} className="wavelet-panel-label" fontSize={PANEL_FONT} fontWeight="700" fill="#111820">(b) CWT magnitude</text>
+            <rect x={MARGIN.left} y={HEATMAP_TOP} width={plotWidth} height={HEATMAP_HEIGHT} fill="#ffffff" stroke="#3f474d" strokeWidth={AXIS_LINE} />
             {displayGrid.values.map((row, frequencyIndex) => {
               const lowerFrequency = boundaries[frequencyIndex];
               const upperFrequency = boundaries[frequencyIndex + 1];
@@ -432,7 +456,7 @@ export function WaveletPanel({ waveforms }: WaveletPanelProps): JSX.Element {
               const x = xScale(tick);
               return (
                 <g key={`heat-x-${tick}`}>
-                  <line x1={x} y1={HEATMAP_TOP} x2={x} y2={HEATMAP_TOP + HEATMAP_HEIGHT} stroke="#e2e8f0" strokeWidth="0.8" />
+                  <line x1={x} y1={HEATMAP_TOP} x2={x} y2={HEATMAP_TOP + HEATMAP_HEIGHT} stroke="#d3d6d8" strokeWidth={GUIDE_LINE} />
                   <text x={x} y={HEATMAP_TOP + HEATMAP_HEIGHT + 20} textAnchor="middle" className="tick-label">{formatTick(tick)}</text>
                 </g>
               );
@@ -442,7 +466,7 @@ export function WaveletPanel({ waveforms }: WaveletPanelProps): JSX.Element {
               const y = heatYScale(tick);
               return (
                 <g key={`heat-y-${tick}`}>
-                  <line x1={MARGIN.left} y1={y} x2={MARGIN.left + plotWidth} y2={y} stroke="#e2e8f0" strokeWidth="0.8" />
+                  <line x1={MARGIN.left} y1={y} x2={MARGIN.left + plotWidth} y2={y} stroke="#d3d6d8" strokeWidth={GUIDE_LINE} />
                   <text x={MARGIN.left - 9} y={y + 4} textAnchor="end" className="tick-label">{formatTick(tick)}</text>
                 </g>
               );
@@ -454,12 +478,13 @@ export function WaveletPanel({ waveforms }: WaveletPanelProps): JSX.Element {
                 <path d={rightCoiPath} fill="#ffffff" opacity="0.46" />
                 <path d={leftCoiPath} fill={`url(#${coiPatternId})`} />
                 <path d={rightCoiPath} fill={`url(#${coiPatternId})`} />
-                <path d={leftCoiBoundary} fill="none" stroke="#354651" strokeWidth="0.9" strokeDasharray="4 3" />
-                <path d={rightCoiBoundary} fill="none" stroke="#354651" strokeWidth="0.9" strokeDasharray="4 3" />
-                <text x={MARGIN.left + 8} y={HEATMAP_TOP + 16} fontSize="10" fontWeight="700" fill="#354651">outside COI</text>
+                <path d={leftCoiBoundary} fill="none" stroke="#354651" strokeWidth={GUIDE_LINE} strokeDasharray="4 3" />
+                <path d={rightCoiBoundary} fill="none" stroke="#354651" strokeWidth={GUIDE_LINE} strokeDasharray="4 3" />
+                <rect x={MARGIN.left + 4} y={HEATMAP_TOP + 4} width={SMALL_FONT * 6.7} height={SMALL_FONT + 7} fill="#ffffff" opacity="0.78" />
+                <text x={MARGIN.left + 8} y={HEATMAP_TOP + SMALL_FONT + 4} fontSize={SMALL_FONT} fontWeight="700" fill="#111820">outside COI</text>
               </g>
             )}
-            <rect x={MARGIN.left} y={HEATMAP_TOP} width={plotWidth} height={HEATMAP_HEIGHT} fill="none" stroke="#64748b" strokeWidth="0.9" />
+            <rect x={MARGIN.left} y={HEATMAP_TOP} width={plotWidth} height={HEATMAP_HEIGHT} fill="none" stroke="#3f474d" strokeWidth={AXIS_LINE} />
             <text x={MARGIN.left + plotWidth / 2} y={HEIGHT - 18} textAnchor="middle" className="axis-label">Time [s]</text>
             <text x="18" y={HEATMAP_TOP + HEATMAP_HEIGHT / 2} textAnchor="middle" className="axis-label" transform={`rotate(-90 18 ${HEATMAP_TOP + HEATMAP_HEIGHT / 2})`}>
               {yAxis === 'frequency' ? 'Frequency [Hz]' : 'Period [s]'}
@@ -467,22 +492,22 @@ export function WaveletPanel({ waveforms }: WaveletPanelProps): JSX.Element {
           </g>
 
           <g>
-            <rect x={WIDTH - 82} y={HEATMAP_TOP} width="16" height={HEATMAP_HEIGHT} fill={`url(#${gradientId})`} stroke="#64748b" strokeWidth="0.8" />
+            <rect x={WIDTH - 82} y={HEATMAP_TOP} width="16" height={HEATMAP_HEIGHT} fill={`url(#${gradientId})`} stroke="#64748b" strokeWidth={GUIDE_LINE} />
             {colorTicks.map((tick) => {
               const y = HEATMAP_TOP + HEATMAP_HEIGHT - ((Math.log10(tick) - Math.log10(displayGrid.colorMin)) / (Math.log10(displayGrid.colorMax) - Math.log10(displayGrid.colorMin))) * HEATMAP_HEIGHT;
               return (
                 <g key={`color-${tick}`}>
-                  <line x1={WIDTH - 66} y1={y} x2={WIDTH - 61} y2={y} stroke="#334155" strokeWidth="0.8" />
+                  <line x1={WIDTH - 66} y1={y} x2={WIDTH - 61} y2={y} stroke="#334155" strokeWidth={GUIDE_LINE} />
                   <text x={WIDTH - 57} y={y + 4} className="tick-label">{formatTick(tick)}</text>
                 </g>
               );
             })}
-            <text x={WIDTH - 24} y={HEATMAP_TOP + HEATMAP_HEIGHT / 2} textAnchor="middle" className="axis-label" transform={`rotate(-90 ${WIDTH - 24} ${HEATMAP_TOP + HEATMAP_HEIGHT / 2})`}>
+            <text x={WIDTH - 102} y={HEATMAP_TOP + HEATMAP_HEIGHT / 2} textAnchor="middle" className="axis-label" transform={`rotate(-90 ${WIDTH - 102} ${HEATMAP_TOP + HEATMAP_HEIGHT / 2})`}>
               CWT magnitude [{result.unit}]
             </text>
           </g>
         </svg>
-        <figcaption className="chart-caption">Viridis log colour scale spans the 5th–98th percentile of positive magnitude. The Morlet CWT uses L2 scale normalization (ψ<sub>s</sub> = ψ(t/s)/√s), so coefficient units are input units × √s ({result.unit}). Hatched regions are outside the cone of influence and should not be interpreted.</figcaption>
+        <figcaption className="chart-caption journal-caption">Viridis log colour scale spans the 5th–98th percentile of positive magnitude. The Morlet CWT uses L2 scale normalization (ψ<sub>s</sub> = ψ(t/s)/√s), so coefficient units are input units × √s ({result.unit}). Hatched regions are outside the cone of influence and should not be interpreted.</figcaption>
       </figure>
     </div>
   );

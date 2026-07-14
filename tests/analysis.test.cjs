@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { fftComplex } = require('../.test-dist/src/analysis/fft.js');
+const { computeFourierSpectrum } = require('../.test-dist/src/analysis/fourier.js');
 const {
   applyJmaFrequencyFilter,
   computeJmaIntensity,
@@ -15,6 +16,16 @@ const {
 const { computeMorletWavelet } = require('../.test-dist/src/analysis/wavelet.js');
 const { parseJmaStrongMotionFile } = require('../.test-dist/src/parsers/jma.js');
 const { downsampleExtrema, downsampleSegments } = require('../.test-dist/src/visualization/downsample.js');
+const {
+  journalRasterSize,
+  millimetresToPixels,
+  pointsToUserUnits,
+  userUnitsToPoints,
+} = require('../.test-dist/src/visualization/journal.js');
+const {
+  alignWaveformTimes,
+  buildWaveformRecordSets,
+} = require('../.test-dist/src/visualization/waveformGroups.js');
 const {
   resolveSvgPhysicalSize,
   setPngResolutionMetadata,
@@ -116,6 +127,19 @@ function naiveDft(inputRe, inputIm = Array(inputRe.length).fill(0), inverse = fa
 
   return { re, im };
 }
+
+test('Fourier spectra do not apply a hidden frequency taper by default', () => {
+  const dt = 0.01;
+  const values = Array.from({ length: 1024 }, (_, index) => Math.sin(2 * Math.PI * 25 * index * dt));
+  const plain = computeFourierSpectrum(values, dt, 'cm/s²');
+  const tapered = computeFourierSpectrum(values, dt, 'cm/s²', { applyFrequencyTaper: true });
+  const index = plain.frequency.reduce(
+    (best, frequency, candidate) => Math.abs(frequency - 25) < Math.abs(plain.frequency[best] - 25) ? candidate : best,
+    0,
+  );
+
+  assert.ok(plain.amplitude[index] > tapered.amplitude[index] * 1.8);
+});
 
 function referenceFftLength(sampleCount) {
   return 2 ** Math.ceil(Math.log2(Math.max(2, sampleCount * 2 + 1)));
@@ -707,8 +731,8 @@ test('L2-normalized Morlet coefficients report input units multiplied by square-
 
 test('publication SVG sizing preserves aspect ratio and accepts exact A4 dimensions', () => {
   const defaultSize = resolveSvgPhysicalSize(900, 430);
-  assert.equal(defaultSize.widthMm, 183);
-  assert.ok(Math.abs(defaultSize.heightMm - 183 * 430 / 900) < 1e-12);
+  assert.equal(defaultSize.widthMm, 180);
+  assert.ok(Math.abs(defaultSize.heightMm - 180 * 430 / 900) < 1e-12);
   assert.deepEqual(resolveSvgPhysicalSize(1120, 1584, { widthMm: 210, heightMm: 297 }), {
     widthMm: 210,
     heightMm: 297,
@@ -717,6 +741,63 @@ test('publication SVG sizing preserves aspect ratio and accepts exact A4 dimensi
     widthMm: 100 * 980 / 620,
     heightMm: 100,
   });
+});
+
+test('journal line-art preset resolves physical size, pixels, and final typography', () => {
+  assert.equal(millimetresToPixels(80, 800), 2520);
+  assert.equal(millimetresToPixels(180, 800), 5669);
+  assert.deepEqual(journalRasterSize(1000, 600, 180, 800), {
+    widthPx: 5669,
+    heightPx: 3401,
+  });
+
+  const eightPointUnits = pointsToUserUnits(8, 1000, 180);
+  assert.ok(Math.abs(userUnitsToPoints(eightPointUnits, 1000, 180) - 8) < 1e-12);
+  assert.ok(userUnitsToPoints(eightPointUnits, 1000, 180) >= 6);
+});
+
+test('journal figures keep separate events out of a shared time axis', () => {
+  const firstEvent = derivedWaveform({
+    id: 'event-a-ns',
+    component: 'NS',
+    values: [0, 1],
+    originTime: '2026-01-01 00:00:00',
+  });
+  const secondEvent = derivedWaveform({
+    id: 'event-b-ns',
+    component: 'NS',
+    values: [0, 2],
+    originTime: '2026-01-02 00:00:00',
+  });
+
+  const groups = buildWaveformRecordSets([firstEvent, secondEvent]);
+  assert.equal(groups.length, 2);
+  assert.deepEqual(groups.map((group) => group.waveforms.map((waveform) => waveform.sourceRecordId)), [
+    ['event-a-ns'],
+    ['event-b-ns'],
+  ]);
+});
+
+test('journal figures align component time axes to the earliest record start', () => {
+  const early = derivedWaveform({
+    id: 'early',
+    component: 'NS',
+    values: [0, 1],
+    recordTime: '2026-01-01 00:00:00',
+    time: [0, 1],
+  });
+  const late = derivedWaveform({
+    id: 'late',
+    component: 'EW',
+    values: [0, 1],
+    recordTime: '2026-01-01 00:00:01',
+    time: [0, 1],
+  });
+
+  const alignment = alignWaveformTimes([early, late]);
+  assert.deepEqual(alignment.values.get('early'), [0, 1]);
+  assert.deepEqual(alignment.values.get('late'), [1, 2]);
+  assert.match(alignment.reference, /earliest record start/);
 });
 
 test('publication PNG export stores 300 dpi physical resolution metadata', () => {

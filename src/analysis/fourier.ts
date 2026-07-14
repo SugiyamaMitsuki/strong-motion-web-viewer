@@ -10,7 +10,7 @@ export interface FourierOptions {
 }
 
 export const defaultFourierOptions: FourierOptions = {
-  applyFrequencyTaper: true,
+  applyFrequencyTaper: false,
   applyTimeTaper: false,
   timeTaperFraction: 0.05,
 };

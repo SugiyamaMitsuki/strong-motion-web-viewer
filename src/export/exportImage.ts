@@ -44,7 +44,7 @@ export interface SvgPhysicalSize {
   heightMm: number;
 }
 
-const DEFAULT_SVG_WIDTH_MM = 183;
+const DEFAULT_SVG_WIDTH_MM = 180;
 
 function positiveFinite(value: number | undefined): value is number {
   return value !== undefined && Number.isFinite(value) && value > 0;
@@ -200,8 +200,8 @@ export async function downloadPng(
     await loadPromise;
 
     const { width, height } = svgDimensions(svg);
-    const dpi = options.dpi ?? 300;
-    const widthMm = options.widthMm ?? 183;
+    const dpi = options.dpi ?? 800;
+    const widthMm = options.widthMm ?? DEFAULT_SVG_WIDTH_MM;
     const targetWidth = (widthMm / 25.4) * dpi;
     const scale = options.scale ?? targetWidth / width;
     const canvas = document.createElement('canvas');
