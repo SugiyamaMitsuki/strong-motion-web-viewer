@@ -632,6 +632,29 @@ td.numeric {
   background: #ffffff;
 }
 
+.report-figure {
+  border-color: #aeb8bf;
+  border-radius: 4px;
+  background: #eef2f4;
+  box-shadow: none;
+}
+
+.report-toolbar {
+  background: #ffffff;
+}
+
+.report-chart {
+  box-sizing: border-box;
+  max-width: 1120px;
+  margin-inline: auto;
+  border-inline: 1px solid #d4dade;
+  background: #ffffff;
+}
+
+.report-controls .warning-text {
+  flex-basis: 100%;
+}
+
 .grayscale-preview .publication-chart {
   filter: grayscale(1);
 }
@@ -1321,6 +1344,11 @@ td.numeric {
     margin: 12mm;
   }
 
+  @page report {
+    size: A4 portrait;
+    margin: 8mm;
+  }
+
   body {
     background: #ffffff;
   }
@@ -1360,6 +1388,20 @@ td.numeric {
 
   .publication-chart {
     max-height: 255mm;
+  }
+
+  .report-figure {
+    page: report;
+    break-inside: avoid;
+    break-after: page;
+  }
+
+  .report-figure .report-chart {
+    width: 194mm;
+    max-width: 194mm;
+    max-height: 274mm;
+    margin: 0 auto;
+    border: 0;
   }
 
   .mobile-scroll-hint {

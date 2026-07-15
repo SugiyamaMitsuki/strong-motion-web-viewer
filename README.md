@@ -53,15 +53,19 @@ https://sugiyamamitsuki.github.io/strong-motion-web-viewer/
   - Event/station/channel record-set selection prevents unrelated spectra or duplicate component styles from being overlaid
   - Caption, embedded SVG metadata, and Methods JSON record the window, `|DFT|Δt` normalization, one-sided convention, `df`, `1/T`, smoothing, data identity, and preprocessing
 - Morlet wavelet scalograms
-  - Continuous wavelet transform with Morlet wavelet `omega0 = 8`
+  - Continuous wavelet transform with `Morlet-6 Balanced` and `Morlet-8 Frequency-resolved` presets
+  - Exact Morlet scale-to-equivalent-Fourier-frequency conversion
+  - Scale-corrected, sinusoid-calibrated amplitude and bias-rectified power displays; raw L2 coefficients remain available as an expert diagnostic
+  - Single-component inspection or aligned NS/EW/UD publication plates with shared time, frequency, and colour limits
   - Frequency or period Y-axis display
   - Fast / Standard / Detailed / Publication resolution options with 48 / 96 / 128 / 160 logarithmic frequencies
-  - Perceptually uniform Viridis colour scale with a fixed shared dB range for controlled comparisons
-  - Optional record-specific 5th–98th percentile range, explicitly marked as not comparable across records
-  - Hatched Morlet cone-of-influence mask for edge-effect interpretation
+  - Perceptually uniform Viridis colour scale with separate relative-morphology and absolute-comparison modes
+  - Colour statistics are calculated only from interpretable samples inside the cone of influence, with the clipped-pixel fraction reported
+  - Explicit Morlet cone-of-influence mask for edge-effect interpretation
   - Kaiser-windowed sinc anti-alias resampling before CWT computation when a long record exceeds the browser-side sample cap
-  - Optional descriptive maximum-magnitude ridge restricted to the cone of influence and displayed colour floor
-  - L2-normalized coefficients are labelled with their dimensional unit (`input unit · √s`)
+  - Optional descriptive dominant-frequency trace restricted to the cone of influence; it is not presented as a phase pick or modal ridge
+  - Time-pixel aggregation uses power-domain RMS rather than arithmetic averaging of coefficient magnitudes
+  - L2-normalized coefficients are retained with their dimensional unit (`input unit · √s`) and all derived displays state their normalization
   - 180 mm SVG, 800 dpi PNG, and Methods JSON exports with exact colour/CWT settings and data provenance
 - Horizontal-to-vertical spectral ratio
   - Station/channel sets are separated by event identity so different earthquakes are never combined
@@ -113,10 +117,13 @@ https://sugiyamamitsuki.github.io/strong-motion-web-viewer/
   - Explicit horizontal-swipe cue on narrow screens while the page body remains fixed to the viewport
   - 800 dpi PNG export with physical-resolution metadata and editable SVG working export
 - Report overview figure
-  - Combines record metadata, latitude/longitude, distances, ground motion strength, stacked acceleration/velocity waveforms, and tripartite response spectrum in a separate A4 analysis-overview figure
+  - A publication-oriented A4 summary separates the executive overview from dense diagnostic plots
+  - The overview combines event/station metadata, a tile-independent locator inset, ground-motion metrics, three-component acceleration, Parzen-smoothed Fourier spectra, and 5%-damped Sa
+  - Velocity histories and the engineering tripartite spectrum remain available as a separate detail plate instead of competing with the primary results
   - Separates events and KiK-net channel suffixes before analysis
   - Uses a shared ordinate; parseable record timestamps are aligned to the earliest start, otherwise the component-relative time reference is stated explicitly
-  - Exports an editable SVG or exact A4-width 300 dpi PNG with embedded resolution metadata
+  - Uses print-safe typography, line weights, margins, sparse guide lines, and data-external peak labels
+  - Exports editable SVG, exact A4-width 300 dpi PNG, and a Methods JSON containing preprocessing, Fourier, response, and provenance settings
 - Figure export
   - SVG working files with 180 mm physical dimensions, inlined presentation styles, and embedded method metadata
   - 180 mm-wide 800 dpi PNG for journal charts and 210 mm-wide 300 dpi PNG for the separate A4 overview report

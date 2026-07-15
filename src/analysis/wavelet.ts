@@ -12,6 +12,8 @@ export interface WaveletOptions {
 export interface WaveletResult {
   time: number[];
   frequency: number[];
+  /** Exact Morlet scales corresponding to `frequency`, in seconds. */
+  scaleSeconds: number[];
   amplitude: number[][];
   /** Unit of the input signal before the continuous wavelet transform. */
   inputUnit: string;
@@ -22,11 +24,50 @@ export interface WaveletResult {
   inputSamples: number;
   computedSamples: number;
   resampling: WaveletResamplingMetadata;
+  /** Morlet e-folding half-width, sqrt(2) * scale, for every frequency row. */
+  coneOfInfluenceHalfWidthSeconds: number[];
+  /** Whether at least one computed time sample in the row lies inside the COI. */
+  frequencyHasValidCone: boolean[];
+  metadata: WaveletTransformMetadata;
+}
+
+export type WaveletQuantity = 'raw-l2' | 'scale-corrected-amplitude' | 'rectified-power';
+
+export interface WaveletTransformMetadata {
+  motherWavelet: 'complex Morlet';
+  morletOmega0: number;
+  minimumAdmissibleOmega0: number;
+  admissibility: 'uncorrected Morlet restricted to omega0 >= 5';
+  /** Torrence-Compo Fourier factor, f = factor / scale. */
+  morletFourierFactor: number;
+  scaleFrequencyRelation: 'f = (omega0 + sqrt(omega0^2 + 2)) / (4*pi*scale)';
+  meanRemoved: boolean;
+  removedMean: number | null;
+  meanRemovalStage: 'after anti-alias resampling and before CWT';
+  requestedFrequencyBoundsHz: [number, number];
+  effectiveFrequencyBoundsHz: [number, number] | null;
+  nyquistFrequencyHz: number;
+  /** Maximum reported equivalent-Fourier frequency as a fraction of Nyquist. */
+  highFrequencyLimitFractionOfNyquist: number;
+  highFrequencyLimitHz: number;
+  paddedSignalSamples: number;
+  fftLength: number;
+  padding: 'zero';
+  kernelCentering: 'integer-sample centre aligned to output samples';
+  coneOfInfluenceDefinition: 'sqrt(2) * scale (Morlet power e-folding time)';
+  quantityDefinitions: {
+    rawL2: '|W|';
+    scaleCorrectedAmplitude: 'C(omega0) * |W| / sqrt(scale)';
+    rectifiedPower: 'C(omega0)^2 * |W|^2 / scale';
+  };
+  sinusoidAmplitudeCalibration: number;
+  sinusoidAmplitudeCalibrationDefinition: 'C(omega0) = sqrt(2)/pi^(1/4) * exp(((omega0 + sqrt(omega0^2 + 2))/2 - omega0)^2 / 2)';
+  scaleCorrectedAmplitudeInterpretation: 'carrier-sinusoid-calibrated, frequency-comparable Morlet amplitude; not an instantaneous signal envelope';
 }
 
 export interface WaveletResamplingMetadata {
   applied: boolean;
-  method: 'none' | 'Kaiser-windowed sinc polyphase anti-alias resampling';
+  method: 'none' | 'Kaiser-windowed sinc anti-alias resampling';
   inputSamples: number;
   computedSamples: number;
   inputDtSeconds: number;
@@ -37,11 +78,14 @@ export interface WaveletResamplingMetadata {
   stopbandStartHz?: number;
   kaiserBeta?: number;
   kernelHalfWidthInputSamples?: number;
+  boundaryTreatment?: 'symmetric reflection at both input edges';
 }
 
 export interface DominantWaveletRidgeOptions {
   /** Morlet non-dimensional central frequency used by the transform. */
   morletOmega0?: number;
+  /** Quantity used both to compare rows and to report ridge amplitude. */
+  quantity?: WaveletQuantity;
   /** Omit coefficient maxima where the wavelet support intersects a record edge. */
   excludeOutsideConeOfInfluence?: boolean;
 }
@@ -50,18 +94,136 @@ export interface DominantWaveletRidge {
   time: number[];
   /** Per-time maximum-coefficient frequency. NaN denotes no valid value inside the COI. */
   frequency: number[];
+  /** Ridge ordinate in `quantity`; NaN denotes no finite positive maximum. */
   amplitude: number[];
+  quantity: WaveletQuantity;
+  unit: string;
 }
 
 export const defaultWaveletOptions: WaveletOptions = {
   minFrequency: 0.1,
   maxFrequency: 10,
   frequencyCount: 80,
-  morletOmega0: 8,
+  morletOmega0: 6,
   maxSamples: 6144,
 };
 
+export const MIN_MORLET_OMEGA0 = 5;
+export const MORLET_NYQUIST_FREQUENCY_FRACTION = 0.8;
 export const MORLET_CWT_NORMALIZATION = 'L2-normalized: psi_scale(t) = psi(t / scale) / sqrt(scale)';
+
+function requireMorletOmega0(value: number): number {
+  if (!Number.isFinite(value) || value < MIN_MORLET_OMEGA0) {
+    throw new RangeError(`Morlet omega0 must be finite and >= ${MIN_MORLET_OMEGA0}.`);
+  }
+  return value;
+}
+
+/** Exact Torrence-Compo equivalent-Fourier-frequency factor, f = factor / scale. */
+export function morletFourierFactor(morletOmega0 = defaultWaveletOptions.morletOmega0): number {
+  const omega0 = requireMorletOmega0(morletOmega0);
+  return (omega0 + Math.sqrt(omega0 ** 2 + 2)) / (4 * Math.PI);
+}
+
+export function morletScaleFromFrequency(
+  frequencyHz: number,
+  morletOmega0 = defaultWaveletOptions.morletOmega0,
+): number {
+  if (!Number.isFinite(frequencyHz) || frequencyHz <= 0) {
+    throw new RangeError('Morlet equivalent Fourier frequency must be finite and > 0.');
+  }
+  return morletFourierFactor(morletOmega0) / frequencyHz;
+}
+
+export function morletFrequencyFromScale(
+  scaleSeconds: number,
+  morletOmega0 = defaultWaveletOptions.morletOmega0,
+): number {
+  if (!Number.isFinite(scaleSeconds) || scaleSeconds <= 0) {
+    throw new RangeError('Morlet scale must be finite and > 0.');
+  }
+  return morletFourierFactor(morletOmega0) / scaleSeconds;
+}
+
+/**
+ * Calibration from |W| / sqrt(scale) to the peak amplitude of a matching
+ * stationary sinusoid on the exact equivalent-Fourier-frequency scale.
+ */
+export function morletSinusoidAmplitudeCalibration(
+  morletOmega0 = defaultWaveletOptions.morletOmega0,
+): number {
+  const omega0 = requireMorletOmega0(morletOmega0);
+  const q = 2 * Math.PI * morletFourierFactor(omega0);
+  return (Math.SQRT2 / (Math.PI ** 0.25)) * Math.exp(0.5 * (q - omega0) ** 2);
+}
+
+/** Exact sinusoid-amplitude calibration at the default Morlet omega0. */
+export const MORLET_SINUSOID_AMPLITUDE_CALIBRATION = morletSinusoidAmplitudeCalibration();
+
+export function waveletQuantityUnit(inputUnit: string, quantity: WaveletQuantity): string {
+  const normalized = inputUnit.trim();
+  if (quantity === 'raw-l2') return cwtCoefficientUnit(inputUnit);
+  if (quantity === 'rectified-power') return normalized ? `(${normalized})²` : 'input²';
+  return normalized || 'input';
+}
+
+/**
+ * Derive a display quantity from one raw L2 coefficient magnitude without retaining
+ * additional CWT-sized matrices. The corrected amplitude includes the exact
+ * complex-Morlet sinusoid calibration on the equivalent-Fourier-frequency scale.
+ */
+export function waveletValue(
+  rawL2Magnitude: number,
+  scaleSeconds: number,
+  quantity: WaveletQuantity,
+  morletOmega0 = defaultWaveletOptions.morletOmega0,
+): number {
+  if (!Number.isFinite(rawL2Magnitude) || rawL2Magnitude < 0) return Number.NaN;
+  if (quantity === 'raw-l2') return rawL2Magnitude;
+  if (!Number.isFinite(scaleSeconds) || scaleSeconds <= 0) return Number.NaN;
+  const correctedAmplitude = morletSinusoidAmplitudeCalibration(morletOmega0)
+    * rawL2Magnitude / Math.sqrt(scaleSeconds);
+  return quantity === 'rectified-power' ? correctedAmplitude ** 2 : correctedAmplitude;
+}
+
+/** Derive one frequency row in the requested quantity; raw L2 rows are returned without copying. */
+export function waveletRow(
+  result: WaveletResult,
+  frequencyIndex: number,
+  quantity: WaveletQuantity,
+): number[] {
+  const rawRow = result.amplitude[frequencyIndex];
+  if (!rawRow) return [];
+  if (quantity === 'raw-l2') return rawRow;
+  const scale = result.scaleSeconds[frequencyIndex];
+  const omega0 = result.metadata?.morletOmega0 ?? defaultWaveletOptions.morletOmega0;
+  return rawRow.map((value) => waveletValue(value, scale, quantity, omega0));
+}
+
+export function isInsideWaveletConeOfInfluence(
+  timeSeconds: number,
+  recordStartSeconds: number,
+  recordEndSeconds: number,
+  coiHalfWidthSeconds: number,
+): boolean {
+  if (![timeSeconds, recordStartSeconds, recordEndSeconds, coiHalfWidthSeconds].every(Number.isFinite)
+    || recordEndSeconds < recordStartSeconds || coiHalfWidthSeconds < 0) return false;
+  const edgeDistance = Math.min(timeSeconds - recordStartSeconds, recordEndSeconds - timeSeconds);
+  return edgeDistance + Number.EPSILON * Math.max(1, Math.abs(timeSeconds)) >= coiHalfWidthSeconds;
+}
+
+export function isWaveletPointInsideConeOfInfluence(
+  result: WaveletResult,
+  frequencyIndex: number,
+  timeIndex: number,
+): boolean {
+  const time = result.time[timeIndex];
+  const halfWidth = result.coneOfInfluenceHalfWidthSeconds[frequencyIndex];
+  if (!Number.isFinite(time) || !Number.isFinite(halfWidth)) return false;
+  const start = result.time[0];
+  const end = result.time[result.time.length - 1];
+  return isInsideWaveletConeOfInfluence(time, start, end, halfWidth);
+}
 
 export function cwtCoefficientUnit(inputUnit: string): string {
   const normalized = inputUnit.trim();
@@ -84,9 +246,10 @@ export function computeDominantWaveletRidge(
   result: WaveletResult,
   options: DominantWaveletRidgeOptions = {},
 ): DominantWaveletRidge {
-  const omega0 = Number.isFinite(options.morletOmega0) && (options.morletOmega0 ?? 0) >= 2
-    ? options.morletOmega0 as number
-    : defaultWaveletOptions.morletOmega0;
+  const omega0 = requireMorletOmega0(
+    options.morletOmega0 ?? result.metadata?.morletOmega0 ?? defaultWaveletOptions.morletOmega0,
+  );
+  const quantity = options.quantity ?? 'scale-corrected-amplitude';
   const excludeOutsideConeOfInfluence = options.excludeOutsideConeOfInfluence ?? true;
   const startTime = result.time[0] ?? 0;
   const endTime = result.time[result.time.length - 1] ?? startTime;
@@ -102,12 +265,16 @@ export function computeDominantWaveletRidge(
     for (let frequencyIndex = 0; frequencyIndex < result.frequency.length; frequencyIndex += 1) {
       const currentFrequency = result.frequency[frequencyIndex];
       if (!Number.isFinite(currentFrequency) || currentFrequency <= 0) continue;
+      const scale = result.scaleSeconds?.[frequencyIndex]
+        ?? morletScaleFromFrequency(currentFrequency, omega0);
       if (excludeOutsideConeOfInfluence) {
-        const scale = omega0 / (2 * Math.PI * currentFrequency);
-        if (edgeDistance < Math.SQRT2 * scale) continue;
+        const halfWidth = result.coneOfInfluenceHalfWidthSeconds?.[frequencyIndex]
+          ?? Math.SQRT2 * scale;
+        if (edgeDistance < halfWidth) continue;
       }
 
-      const currentAmplitude = result.amplitude[frequencyIndex]?.[timeIndex];
+      const rawMagnitude = result.amplitude[frequencyIndex]?.[timeIndex];
+      const currentAmplitude = waveletValue(rawMagnitude, scale, quantity, omega0);
       if (!Number.isFinite(currentAmplitude) || currentAmplitude < 0 || currentAmplitude <= bestAmplitude) continue;
       bestAmplitude = currentAmplitude;
       bestFrequency = currentFrequency;
@@ -119,7 +286,13 @@ export function computeDominantWaveletRidge(
     }
   }
 
-  return { time: [...result.time], frequency, amplitude };
+  return {
+    time: [...result.time],
+    frequency,
+    amplitude,
+    quantity,
+    unit: waveletQuantityUnit(result.inputUnit, quantity),
+  };
 }
 
 function isFiniteNumber(value: unknown): value is number {
@@ -219,7 +392,7 @@ function resampleEvenly(values: readonly number[], dt: number, maxSamples: numbe
     dt: nextDt,
     metadata: {
       applied: true,
-      method: 'Kaiser-windowed sinc polyphase anti-alias resampling',
+      method: 'Kaiser-windowed sinc anti-alias resampling',
       inputSamples: n,
       computedSamples: targetCount,
       inputDtSeconds: dt,
@@ -228,7 +401,51 @@ function resampleEvenly(values: readonly number[], dt: number, maxSamples: numbe
       stopbandStartHz: targetNyquistHz,
       kaiserBeta: KAISER_BETA,
       kernelHalfWidthInputSamples: halfWidth,
+      boundaryTreatment: 'symmetric reflection at both input edges',
     },
+  };
+}
+
+interface WaveletMetadataArguments {
+  omega0: number;
+  removedMean: number | null;
+  requestedFrequencyBoundsHz: [number, number];
+  effectiveFrequencyBoundsHz: [number, number] | null;
+  nyquistFrequencyHz: number;
+  highFrequencyLimitHz: number;
+  paddedSignalSamples: number;
+  fftLength: number;
+}
+
+function buildWaveletMetadata(arguments_: WaveletMetadataArguments): WaveletTransformMetadata {
+  return {
+    motherWavelet: 'complex Morlet',
+    morletOmega0: arguments_.omega0,
+    minimumAdmissibleOmega0: MIN_MORLET_OMEGA0,
+    admissibility: 'uncorrected Morlet restricted to omega0 >= 5',
+    morletFourierFactor: morletFourierFactor(arguments_.omega0),
+    scaleFrequencyRelation: 'f = (omega0 + sqrt(omega0^2 + 2)) / (4*pi*scale)',
+    meanRemoved: arguments_.removedMean !== null,
+    removedMean: arguments_.removedMean,
+    meanRemovalStage: 'after anti-alias resampling and before CWT',
+    requestedFrequencyBoundsHz: arguments_.requestedFrequencyBoundsHz,
+    effectiveFrequencyBoundsHz: arguments_.effectiveFrequencyBoundsHz,
+    nyquistFrequencyHz: arguments_.nyquistFrequencyHz,
+    highFrequencyLimitFractionOfNyquist: MORLET_NYQUIST_FREQUENCY_FRACTION,
+    highFrequencyLimitHz: arguments_.highFrequencyLimitHz,
+    paddedSignalSamples: arguments_.paddedSignalSamples,
+    fftLength: arguments_.fftLength,
+    padding: 'zero',
+    kernelCentering: 'integer-sample centre aligned to output samples',
+    coneOfInfluenceDefinition: 'sqrt(2) * scale (Morlet power e-folding time)',
+    quantityDefinitions: {
+      rawL2: '|W|',
+      scaleCorrectedAmplitude: 'C(omega0) * |W| / sqrt(scale)',
+      rectifiedPower: 'C(omega0)^2 * |W|^2 / scale',
+    },
+    sinusoidAmplitudeCalibration: morletSinusoidAmplitudeCalibration(arguments_.omega0),
+    sinusoidAmplitudeCalibrationDefinition: 'C(omega0) = sqrt(2)/pi^(1/4) * exp(((omega0 + sqrt(omega0^2 + 2))/2 - omega0)^2 / 2)',
+    scaleCorrectedAmplitudeInterpretation: 'carrier-sinusoid-calibrated, frequency-comparable Morlet amplitude; not an instantaneous signal envelope',
   };
 }
 
@@ -243,12 +460,23 @@ export function computeMorletWavelet(
     ...options,
   };
   const coefficientUnit = cwtCoefficientUnit(unit);
+  const omega0 = requireMorletOmega0(settings.morletOmega0 ?? defaultWaveletOptions.morletOmega0);
+  const requestedMinFrequency = isFiniteNumber(settings.minFrequency) && settings.minFrequency > 0
+    ? settings.minFrequency
+    : defaultWaveletOptions.minFrequency;
+  const requestedMaxFrequency = isFiniteNumber(settings.maxFrequency) && settings.maxFrequency > requestedMinFrequency
+    ? settings.maxFrequency
+    : Math.max(defaultWaveletOptions.maxFrequency, requestedMinFrequency * 10);
+  const requestedFrequencyBoundsHz: [number, number] = [requestedMinFrequency, requestedMaxFrequency];
 
-  if (values.length === 0 || dt <= 0) {
+  if (values.length === 0 || !isFiniteNumber(dt) || dt <= 0) {
     const inputSamples = values.length;
+    const nyquist = dt > 0 ? 0.5 / dt : 0;
+    const highFrequencyLimitHz = nyquist * MORLET_NYQUIST_FREQUENCY_FRACTION;
     return {
       time: [],
       frequency: [],
+      scaleSeconds: [],
       amplitude: [],
       inputUnit: unit,
       unit: coefficientUnit,
@@ -264,30 +492,44 @@ export function computeMorletWavelet(
         inputDtSeconds: dt,
         effectiveDtSeconds: dt,
       },
+      coneOfInfluenceHalfWidthSeconds: [],
+      frequencyHasValidCone: [],
+      metadata: buildWaveletMetadata({
+        omega0,
+        removedMean: null,
+        requestedFrequencyBoundsHz,
+        effectiveFrequencyBoundsHz: null,
+        nyquistFrequencyHz: nyquist,
+        highFrequencyLimitHz,
+        paddedSignalSamples: 0,
+        fftLength: 0,
+      }),
     };
   }
 
-  const working = resampleEvenly(values, dt, settings.maxSamples);
+  const maxSamples = isFiniteNumber(settings.maxSamples) && settings.maxSamples >= 64
+    ? Math.floor(settings.maxSamples)
+    : defaultWaveletOptions.maxSamples;
+  const working = resampleEvenly(values, dt, maxSamples);
+  const removedMean = working.values.reduce((sum, value) => sum + value, 0) / working.values.length;
   const signal = subtractMean(working.values);
   const n = signal.length;
   const nyquist = 0.5 / working.dt;
-  const requestedMinFrequency = isFiniteNumber(settings.minFrequency) && settings.minFrequency > 0
-    ? settings.minFrequency
-    : defaultWaveletOptions.minFrequency;
-  const requestedMaxFrequency = isFiniteNumber(settings.maxFrequency) && settings.maxFrequency > requestedMinFrequency
-    ? settings.maxFrequency
-    : defaultWaveletOptions.maxFrequency;
   const minFrequency = Math.max(requestedMinFrequency, 1 / Math.max(n * working.dt, working.dt));
-  const antiAliasPassbandEndHz = working.metadata.applied
-    ? working.metadata.passbandEndHz ?? nyquist * 0.8
-    : nyquist * 0.98;
-  const maxFrequency = Math.min(requestedMaxFrequency, nyquist * 0.98, antiAliasPassbandEndHz);
-  const frequency = logSpace(minFrequency, maxFrequency, settings.frequencyCount);
+  const morletSafeLimitHz = nyquist * MORLET_NYQUIST_FREQUENCY_FRACTION;
+  const antiAliasPassbandEndHz = working.metadata.passbandEndHz ?? morletSafeLimitHz;
+  const highFrequencyLimitHz = Math.min(morletSafeLimitHz, antiAliasPassbandEndHz);
+  const maxFrequency = Math.min(requestedMaxFrequency, highFrequencyLimitHz);
+  const frequencyCount = isFiniteNumber(settings.frequencyCount)
+    ? Math.max(2, Math.floor(settings.frequencyCount))
+    : defaultWaveletOptions.frequencyCount;
+  const frequency = logSpace(minFrequency, maxFrequency, frequencyCount);
 
   if (frequency.length === 0) {
     return {
       time: [],
       frequency: [],
+      scaleSeconds: [],
       amplitude: [],
       inputUnit: unit,
       unit: coefficientUnit,
@@ -296,6 +538,18 @@ export function computeMorletWavelet(
       inputSamples: values.length,
       computedSamples: n,
       resampling: working.metadata,
+      coneOfInfluenceHalfWidthSeconds: [],
+      frequencyHasValidCone: [],
+      metadata: buildWaveletMetadata({
+        omega0,
+        removedMean,
+        requestedFrequencyBoundsHz,
+        effectiveFrequencyBoundsHz: null,
+        nyquistFrequencyHz: nyquist,
+        highFrequencyLimitHz,
+        paddedSignalSamples: 0,
+        fftLength: 0,
+      }),
     };
   }
 
@@ -306,15 +560,27 @@ export function computeMorletWavelet(
 
   const signalSpectrum = fftComplex(input);
   const time = Array.from({ length: n }, (_, index) => index * working.dt);
+  const scaleSeconds = frequency.map((value) => morletScaleFromFrequency(value, omega0));
+  const coneOfInfluenceHalfWidthSeconds = scaleSeconds.map((scale) => Math.SQRT2 * scale);
+  const recordEndTime = time[time.length - 1] ?? 0;
+  const middleIndex = Math.floor((time.length - 1) / 2);
+  const maximumSampledEdgeDistance = Math.min(
+    time[middleIndex] ?? 0,
+    recordEndTime - (time[middleIndex] ?? 0),
+  );
+  const frequencyHasValidCone = coneOfInfluenceHalfWidthSeconds.map(
+    (halfWidth) => halfWidth <= maximumSampledEdgeDistance + Number.EPSILON * Math.max(1, recordEndTime),
+  );
   const amplitude: number[][] = [];
-  const omega0 = Math.max(2, settings.morletOmega0);
-  const timeMax = (paddedPointCount - 1) * working.dt;
-  const centerTime = timeMax / 2;
-  const startIndex = Math.max(0, Math.floor(centerTime / working.dt));
+  // Centre the discrete kernel on an integer sample. A half-sample kernel
+  // centre shifts impulse maxima by one displayed sample after convolution.
+  const centerIndex = Math.floor(paddedPointCount / 2);
+  const centerTime = centerIndex * working.dt;
+  const startIndex = centerIndex;
   const morletNorm = Math.PI ** -0.25;
 
-  for (const f of frequency) {
-    const scale = omega0 / (2 * Math.PI * f);
+  for (let frequencyIndex = 0; frequencyIndex < frequency.length; frequencyIndex += 1) {
+    const scale = scaleSeconds[frequencyIndex];
     const waveletRe = Array(fftLength).fill(0);
     const waveletIm = Array(fftLength).fill(0);
 
@@ -347,6 +613,7 @@ export function computeMorletWavelet(
   return {
     time,
     frequency,
+    scaleSeconds,
     amplitude,
     inputUnit: unit,
     unit: coefficientUnit,
@@ -355,5 +622,17 @@ export function computeMorletWavelet(
     inputSamples: values.length,
     computedSamples: n,
     resampling: working.metadata,
+    coneOfInfluenceHalfWidthSeconds,
+    frequencyHasValidCone,
+    metadata: buildWaveletMetadata({
+      omega0,
+      removedMean,
+      requestedFrequencyBoundsHz,
+      effectiveFrequencyBoundsHz: [frequency[0], frequency[frequency.length - 1]],
+      nyquistFrequencyHz: nyquist,
+      highFrequencyLimitHz,
+      paddedSignalSamples: paddedPointCount,
+      fftLength,
+    }),
   };
 }

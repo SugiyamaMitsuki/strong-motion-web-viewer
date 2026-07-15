@@ -20,9 +20,19 @@ const {
   generateLogPeriods,
 } = require('../.test-dist/src/analysis/responseSpectrum.js');
 const {
+  MORLET_NYQUIST_FREQUENCY_FRACTION,
+  MORLET_SINUSOID_AMPLITUDE_CALIBRATION,
   computeDominantWaveletRidge,
   computeMorletWavelet,
+  isWaveletPointInsideConeOfInfluence,
+  morletFourierFactor,
+  morletFrequencyFromScale,
+  morletScaleFromFrequency,
+  morletSinusoidAmplitudeCalibration,
   waveletMagnitudeToDecibels,
+  waveletQuantityUnit,
+  waveletRow,
+  waveletValue,
 } = require('../.test-dist/src/analysis/wavelet.js');
 const { parseJmaStrongMotionFile } = require('../.test-dist/src/parsers/jma.js');
 const { downsampleExtrema, downsampleSegments } = require('../.test-dist/src/visualization/downsample.js');
@@ -963,7 +973,7 @@ test('figure decimation enforces one total budget across many finite segments', 
 
 test('L2-normalized Morlet coefficients report input units multiplied by square-root seconds', () => {
   const dt = 0.02;
-  const values = Array.from({ length: 128 }, (_, index) => Math.sin(2 * Math.PI * index * dt));
+  const values = Array.from({ length: 128 }, (_, index) => 3 + Math.sin(2 * Math.PI * index * dt));
   const result = computeMorletWavelet(values, dt, 'cm/s²', {
     minFrequency: 0.5,
     maxFrequency: 5,
@@ -976,6 +986,130 @@ test('L2-normalized Morlet coefficients report input units multiplied by square-
   assert.equal(result.normalization, 'L2');
   assert.ok(result.amplitude.length > 0);
   assert.equal(result.resampling.applied, false);
+  assert.equal(result.metadata.meanRemoved, true);
+  assert.equal(result.metadata.meanRemovalStage, 'after anti-alias resampling and before CWT');
+  assert.ok(Math.abs(result.metadata.removedMean - values.reduce((sum, value) => sum + value, 0) / values.length) < 1e-12);
+  assert.deepEqual(result.metadata.requestedFrequencyBoundsHz, [0.5, 5]);
+  assert.equal(result.metadata.morletOmega0, 6);
+  assert.ok(result.metadata.fftLength >= result.metadata.paddedSignalSamples);
+});
+
+test('Morlet scale and equivalent Fourier frequency use the exact Torrence-Compo factor', () => {
+  const omega0 = 6;
+  const frequency = 2.5;
+  const expectedFactor = (omega0 + Math.sqrt(omega0 ** 2 + 2)) / (4 * Math.PI);
+  const scale = morletScaleFromFrequency(frequency, omega0);
+
+  assert.ok(Math.abs(morletFourierFactor(omega0) - expectedFactor) < 1e-15);
+  assert.ok(Math.abs(scale - expectedFactor / frequency) < 1e-15);
+  assert.ok(Math.abs(morletFrequencyFromScale(scale, omega0) - frequency) < 1e-14);
+  assert.ok(Math.abs(scale - omega0 / (2 * Math.PI * frequency)) > 1e-4);
+  assert.throws(
+    () => computeMorletWavelet([0, 1, 0], 0.01, 'cm/s²', { morletOmega0: 4.999 }),
+    /omega0 must be finite and >= 5/,
+  );
+});
+
+test('Morlet frequency grid keeps its equivalent-Fourier centre at or below 0.8 Nyquist', () => {
+  const dt = 0.02;
+  const nyquist = 0.5 / dt;
+  const result = computeMorletWavelet(
+    Array.from({ length: 512 }, (_, index) => Math.sin(2 * Math.PI * index * dt)),
+    dt,
+    'cm/s²',
+    { minFrequency: 0.2, maxFrequency: 100, frequencyCount: 32, maxSamples: 512, morletOmega0: 6 },
+  );
+
+  assert.ok(Math.abs(result.frequency.at(-1) - nyquist * MORLET_NYQUIST_FREQUENCY_FRACTION) < 1e-12);
+  assert.equal(result.metadata.highFrequencyLimitFractionOfNyquist, 0.8);
+  assert.ok(Math.abs(result.metadata.highFrequencyLimitHz - 20) < 1e-12);
+  assert.deepEqual(result.metadata.effectiveFrequencyBoundsHz, [result.frequency[0], result.frequency.at(-1)]);
+});
+
+test('carrier-calibrated Morlet amplitude and rectified power are stable across frequency', () => {
+  const dt = 0.01;
+  const sampleCount = 4096;
+  const corrected = [];
+  const powers = [];
+  const raw = [];
+
+  for (const frequency of [0.5, 1, 2, 4, 8]) {
+    const result = computeMorletWavelet(
+      Array.from({ length: sampleCount }, (_, index) => Math.sin(2 * Math.PI * frequency * index * dt)),
+      dt,
+      'cm/s²',
+      {
+        minFrequency: frequency,
+        maxFrequency: frequency * 1.001,
+        frequencyCount: 2,
+        maxSamples: sampleCount,
+        morletOmega0: 8,
+      },
+    );
+    const centre = Math.floor(result.time.length / 2);
+    const amplitudeRow = waveletRow(result, 0, 'scale-corrected-amplitude');
+    const powerRow = waveletRow(result, 0, 'rectified-power');
+    corrected.push(amplitudeRow[centre]);
+    powers.push(powerRow[centre]);
+    raw.push(result.amplitude[0][centre]);
+    assert.ok(Math.abs(powerRow[centre] - amplitudeRow[centre] ** 2) < 1e-14);
+  }
+
+  assert.ok(Math.max(...corrected) - Math.min(...corrected) < 1e-10);
+  assert.ok(corrected.every((value) => Math.abs(value - 1) < 0.003));
+  assert.ok(Math.max(...powers) - Math.min(...powers) < 1e-10);
+  assert.ok(raw[0] / raw.at(-1) > 3.9);
+  const omega0 = 8;
+  const q = (omega0 + Math.sqrt(omega0 ** 2 + 2)) / 2;
+  const expectedCalibration = Math.SQRT2 / Math.PI ** 0.25 * Math.exp((q - omega0) ** 2 / 2);
+  assert.ok(Math.abs(morletSinusoidAmplitudeCalibration(omega0) - expectedCalibration) < 1e-15);
+  assert.ok(Math.abs(MORLET_SINUSOID_AMPLITUDE_CALIBRATION - morletSinusoidAmplitudeCalibration(6)) < 1e-15);
+  assert.equal(waveletQuantityUnit('cm/s²', 'raw-l2'), 'cm/s²·√s');
+  assert.equal(waveletQuantityUnit('cm/s²', 'scale-corrected-amplitude'), 'cm/s²');
+  assert.equal(waveletQuantityUnit('cm/s²', 'rectified-power'), '(cm/s²)²');
+});
+
+test('wavelet result exposes row and point cone-of-influence validity', () => {
+  const result = computeMorletWavelet(
+    Array.from({ length: 256 }, (_, index) => Math.sin(2 * Math.PI * index * 0.05)),
+    0.05,
+    'cm/s²',
+    { minFrequency: 0.01, maxFrequency: 5, frequencyCount: 24, maxSamples: 256, morletOmega0: 6 },
+  );
+  const firstRow = 0;
+  const lastRow = result.frequency.length - 1;
+  const centre = Math.floor(result.time.length / 2);
+
+  assert.equal(result.coneOfInfluenceHalfWidthSeconds.length, result.frequency.length);
+  assert.equal(result.frequencyHasValidCone.length, result.frequency.length);
+  assert.ok(Math.abs(
+    result.coneOfInfluenceHalfWidthSeconds[lastRow] - Math.SQRT2 * result.scaleSeconds[lastRow],
+  ) < 1e-15);
+  assert.equal(result.frequencyHasValidCone[firstRow], false);
+  assert.equal(result.frequencyHasValidCone[lastRow], true);
+  assert.equal(isWaveletPointInsideConeOfInfluence(result, lastRow, 0), false);
+  assert.equal(isWaveletPointInsideConeOfInfluence(result, lastRow, centre), true);
+  assert.equal(isWaveletPointInsideConeOfInfluence(result, firstRow, centre), false);
+});
+
+test('Morlet kernel keeps transient maxima aligned to the input sample', () => {
+  for (const sampleCount of [127, 128, 511, 512]) {
+    const impulseIndex = Math.floor(sampleCount / 2);
+    const values = Array(sampleCount).fill(0);
+    values[impulseIndex] = 1;
+    const result = computeMorletWavelet(values, 0.01, 'cm/s²', {
+      minFrequency: 2,
+      maxFrequency: 10,
+      frequencyCount: 12,
+      maxSamples: sampleCount,
+      morletOmega0: 6,
+    });
+    result.amplitude.forEach((row) => {
+      const peakIndex = row.reduce((best, value, index) => value > row[best] ? index : best, 0);
+      assert.equal(peakIndex, impulseIndex, `sampleCount=${sampleCount}`);
+    });
+    assert.equal(result.metadata.kernelCentering, 'integer-sample centre aligned to output samples');
+  }
 });
 
 function centralWaveletPeak(result) {
@@ -1017,10 +1151,11 @@ test('wavelet downsampling suppresses aliases and records its anti-alias design'
   const aliasPeak = centralWaveletPeak(aliasReference);
 
   assert.equal(high.resampling.applied, true);
-  assert.equal(high.resampling.method, 'Kaiser-windowed sinc polyphase anti-alias resampling');
+  assert.equal(high.resampling.method, 'Kaiser-windowed sinc anti-alias resampling');
   assert.equal(high.resampling.inputSamples, sampleCount);
   assert.equal(high.resampling.computedSamples, maxSamples);
   assert.ok(high.resampling.passbandEndHz < high.resampling.stopbandStartHz);
+  assert.equal(high.resampling.boundaryTreatment, 'symmetric reflection at both input edges');
   assert.ok(highPeak.amplitude < aliasPeak.amplitude * 0.01);
 });
 
@@ -1049,7 +1184,7 @@ test('wavelet magnitude decibels use an explicit reusable amplitude reference', 
 
 test('descriptive wavelet ridge selects per-time maxima only inside the cone of influence', () => {
   const ridge = computeDominantWaveletRidge({
-    time: [0, 1, 2, 3, 4],
+    time: [0, 2, 4, 6, 8],
     frequency: [1, 2],
     amplitude: [
       [100, 4, 3, 2, 100],
@@ -1062,13 +1197,20 @@ test('descriptive wavelet ridge selects per-time maxima only inside the cone of 
     inputSamples: 5,
     computedSamples: 5,
   }, {
-    morletOmega0: 2,
+    morletOmega0: 5,
     excludeOutsideConeOfInfluence: true,
   });
 
   assert.ok(Number.isNaN(ridge.frequency[0]));
   assert.deepEqual(ridge.frequency.slice(1, 4), [1, 2, 1]);
-  assert.deepEqual(ridge.amplitude.slice(1, 4), [4, 5, 2]);
+  const expectedRidgeAmplitude = [
+    waveletValue(4, morletScaleFromFrequency(1, 5), 'scale-corrected-amplitude', 5),
+    waveletValue(5, morletScaleFromFrequency(2, 5), 'scale-corrected-amplitude', 5),
+    waveletValue(2, morletScaleFromFrequency(1, 5), 'scale-corrected-amplitude', 5),
+  ];
+  assert.ok(maxAbsoluteDifference(ridge.amplitude.slice(1, 4), expectedRidgeAmplitude) < 1e-14);
+  assert.equal(ridge.quantity, 'scale-corrected-amplitude');
+  assert.equal(ridge.unit, 'cm/s²');
   assert.ok(Number.isNaN(ridge.frequency[4]));
 
   const zeroRidge = computeDominantWaveletRidge({

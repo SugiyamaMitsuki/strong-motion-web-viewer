@@ -50,12 +50,30 @@
 ### Wavelet scalogram
 
 - 知覚的に単調な Viridis 系の colour map を使う。
-- 異なる記録を比較する既定値は共通の固定 dB レンジとし、基準値、単位、CWT 正規化、周波数格子、前処理が一致する場合だけ比較可能と明示する。
-- 記録内 percentile レンジは画面観察用とし、色が記録間で比較できないことを明示する。
-- colour normalization、coefficient unit、cone of influence を図と metadata の両方に明示する。
+- 母関数は `Morlet-6 Balanced` を強震動の過渡変化に対する既定とし、`Morlet-8 Frequency-resolved` を周波数分解能重視の選択肢とする。どちらも普遍的な最適値とは表記しない。
+- scale と表示周波数の対応には Morlet の厳密な等価 Fourier 周期を使い、近似 `omega0/(2*pi*f)` を軸作成へ使わない。
+- 生の L2 係数 `|W| [input unit · sqrt(s)]` は expert diagnostic とし、論文図の既定は scale bias を補正した量とする。振幅を名乗る場合は母関数の正弦波応答で校正して input unit へ戻し、power はその二乗または明示した `|W|²/s` とする。
+- 記録内の時間–周波数形状を見る相対 dB mode と、同一前処理・同一単位の記録間を比較する絶対量 mode を分離する。相対 mode を記録間比較に使わない。
+- colour normalization、coefficient unit、scale correction、Morlet parameter、frequency mapping、cone of influence を図と metadata の両方に明示する。
 - cone of influence 外は解釈対象外であることをマスクと caption で示す。
-- ridge は COI 内かつ表示 colour floor 以上の最大係数の記述的表示に限り、phase pick、mode 推定、不確実性ではないことを明記する。
-- 長記録を計算上限まで縮約する場合は、Kaiser-windowed sinc anti-alias resampling を先に適用し、passband、stopband、入出力サンプル数、実効 `dt`、表示時間 bin 集約法を metadata に残す。
+- colour percentile と clip rate は COI 内の有限値だけから求め、COI 内に有効点のない周波数行を統計へ混ぜない。
+- ridge は COI 内の補正量に基づく記述的 dominant-frequency trace とし、phase pick、mode 推定、不確実性ではないことを明記する。単純な全周波数 argmax を厳密な wavelet ridge と呼ばない。
+- 時間 pixel への集約は係数振幅の算術平均ではなく、power-domain mean からの RMS を既定とする。最大値集約を使う場合は transient-preserving 表示と明示する。
+- 長記録を計算上限まで縮約する場合は、Kaiser-windowed sinc anti-alias resampling を先に適用し、passband、stopband、入出力サンプル数、実効 `dt`、表示時間 bin 集約法を metadata に残す。非縮約時も Morlet の帯域幅を考慮した安全な Nyquist margin を使う。
+- 三成分比較は NS/EW/UD を共通 time/frequency/colour scale で積層し、共通 colour bar は1本にする。単成分 mode は詳細検査用として残す。
+- heatmap は高解像度 raster、軸・文字・COI・注記は vector とする mixed artwork を許容し、巨大な SVG cell 群と描画 seam を避ける。
+
+### A4 overview report
+
+- 1ページ目は意思決定に必要な overview とし、event/station、M、depth、distance、duration、主要 ground-motion 指標、三成分 acceleration、Parzen FAS、減衰を明示した Sa を優先する。
+- 外部 tile に依存しない locator inset を使い、station と epicentre の相対位置、北、距離を小面積で伝える。
+- velocity、dense tripartite、三成分 scalogram は詳細 plate または2ページ目へ分離し、1ページ目へ詰め込まない。
+- A4最終寸法で本文 7.5 pt以上、軸目盛 8 pt以上、補助線 0.5 pt以上、data line 0.8 pt以上を確保する。
+- peak annotation は data region の外または専用 margin に置き、波形を隠さない。時間 grid は sparse にし、zero line、major grid、data trace の濃度階層を分ける。
+- tripartite guide は decade major と必要な 2・5 minor に制限し、主曲線より弱くする。
+- 座標・距離・peak の表示桁は source precision と図の用途に合わせ、意味のない小数桁を増やさない。
+- footer と本文は一般的な印刷 safe area 内に置き、print CSS に `size: A4 portrait` と余白を明示する。
+- Methods JSON と SVG metadata に source files、component consistency、preprocessing、Parzen bandwidth/window、response method/damping/period grid、time reference、app version、build revision を記録する。
 
 ## 再現性ルール
 
@@ -89,5 +107,7 @@
 - [NILIM technical report, Parzen bandwidth definition](https://www.nilim.go.jp/lab/bcg/siryou/rpn/rpn0075pdf/kh0075.pdf)
 - [ViewWave response-spectrum documentation](https://smo.kenken.go.jp/~kashima/viewwave/basic/response)
 - [ViewWave update history](https://smo.kenken.go.jp/~kashima/viewwave/technical/updates)
+- [Torrence and Compo (1998), A Practical Guide to Wavelet Analysis](https://psl.noaa.gov/people/gilbert.p.compo/Torrence_compo1998.pdf)
+- [Liu, Liang, and Weisberg (2007), Rectification of the Bias in the Wavelet Power Spectrum](https://doi.org/10.1175/2007JTECHO511.1)
 
 ViewWave は比較基準です。本アプリは、共通スケール、論文用 typography、SVG/800 dpi PNG、解析条件と provenance の同時出力を検証可能な上位互換の判定項目とします。一方、投稿先ごとの PDF/EPS/TIFF、font embedding、CMYK は最終投稿時に別途検査します。
