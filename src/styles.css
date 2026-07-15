@@ -1346,7 +1346,7 @@ td.numeric {
 
   @page report {
     size: A4 portrait;
-    margin: 8mm;
+    margin: 0;
   }
 
   body {
@@ -1397,9 +1397,9 @@ td.numeric {
   }
 
   .report-figure .report-chart {
-    width: 194mm;
-    max-width: 194mm;
-    max-height: 274mm;
+    width: 210mm;
+    max-width: 210mm;
+    max-height: 297mm;
     margin: 0 auto;
     border: 0;
   }

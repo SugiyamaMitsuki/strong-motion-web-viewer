@@ -23,7 +23,8 @@ import { formatNumber, safeFileName } from '../utils/file';
 import { componentSeriesStyle } from '../visualization/chartStyle';
 import { downsampleSegments } from '../visualization/downsample';
 import { pointsToUserUnits } from '../visualization/journal';
-import { buildFigureProvenance, preprocessingLabel } from '../visualization/provenance';
+import { publicationSymmetricLimit } from '../visualization/publicationContext';
+import { buildFigureProvenance } from '../visualization/provenance';
 
 interface ReportFigurePanelProps {
   waveforms: DerivedWaveform[];
@@ -82,7 +83,7 @@ interface ComponentConsistency {
   status: 'consistent' | 'review-required';
 }
 
-type ReportPage = 'summary' | 'technical';
+type ReportPage = 'integrated' | 'summary' | 'technical';
 
 const WIDTH = 1120;
 const HEIGHT = 1584;
@@ -102,6 +103,20 @@ const TITLE_FONT = pointsToUserUnits(15, WIDTH, PRINT_WIDTH_MM);
 const MIN_LINE = pointsToUserUnits(0.5, WIDTH, PRINT_WIDTH_MM);
 const AXIS_LINE = pointsToUserUnits(0.65, WIDTH, PRINT_WIDTH_MM);
 const DATA_LINE = pointsToUserUnits(0.9, WIDTH, PRINT_WIDTH_MM);
+
+// The integrated report follows the component convention in the supplied
+// reference plate. Independent dash patterns keep the mapping legible in
+// greyscale and for readers with colour-vision deficiencies.
+const REPORT_COMPONENT_STYLES: Readonly<Record<string, { color: string; dashArray?: string }>> = {
+  NS: { color: '#D55E00' },
+  EW: { color: '#0072B2', dashArray: '10 4' },
+  UD: { color: '#AA3377', dashArray: '2.5 3' },
+  OTHER: { color: '#555555', dashArray: '8 3 2 3' },
+};
+
+function reportComponentStyle(component: string, fallbackIndex = 0): { color: string; dashArray?: string } {
+  return REPORT_COMPONENT_STYLES[component] ?? componentSeriesStyle(component, fallbackIndex);
+}
 
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value);
@@ -428,7 +443,7 @@ function responseSeries(
   return [...results]
     .sort((a, b) => componentRank(a.component) - componentRank(b.component))
     .map((result, index) => {
-      const style = componentSeriesStyle(result.component, index);
+      const style = reportComponentStyle(result.component, index);
       return {
         name: result.componentLabel,
         x: result.points.map((point) => point.period),
@@ -447,18 +462,25 @@ function responseSeriesRange(series: readonly SeriesSpec[]): { min: number; max:
 
 function tripartiteDomains(series: readonly SeriesSpec[], settings: ResponseSpectrumSettings): { xDomain: [number, number]; yDomain: [number, number] } {
   const finitePeriods = series.flatMap((entry) => entry.x.filter((value, index) => value > 0 && Number.isFinite(entry.y[index]) && entry.y[index] > 0));
-  const xDomain: [number, number] = finitePeriods.length > 1
-    ? [niceLogFloor(Math.min(...finitePeriods), settings.minPeriod), niceLogCeil(Math.max(...finitePeriods), settings.maxPeriod)]
+  const finitePeriodMinimum = finitePeriods.length > 0 ? Math.min(...finitePeriods) : Number.NaN;
+  const finitePeriodMaximum = finitePeriods.length > 0 ? Math.max(...finitePeriods) : Number.NaN;
+  const xDomain: [number, number] = Number.isFinite(finitePeriodMinimum)
+    && Number.isFinite(finitePeriodMaximum)
+    && finitePeriodMaximum > finitePeriodMinimum
+    ? [finitePeriodMinimum, finitePeriodMaximum]
     : [settings.minPeriod, settings.maxPeriod];
   const range = responseSeriesRange(series);
   const yRange = range
     ? snapLogRange({ minLog: Math.log10(range.min) - 0.08, maxLog: Math.log10(range.max) + 0.08 })
     : { minLog: -2, maxLog: 1 };
   const xRange = toLogRange(xDomain);
-  const targetSpan = Math.max(xRange.maxLog - xRange.minLog, yRange.maxLog - yRange.minLog);
+  const xSpan = xRange.maxLog - xRange.minLog;
   return {
-    xDomain: fromLogRange(expandLogRange(xRange, targetSpan)),
-    yDomain: fromLogRange(expandLogRange(yRange, targetSpan)),
+    // Never invent periods outside the finite response calculation. Instead,
+    // expand only the pSv ordinate when it needs more decades; render geometry
+    // compensates if the data itself spans more pSv decades than period decades.
+    xDomain,
+    yDomain: fromLogRange(expandLogRange(yRange, xSpan)),
   };
 }
 
@@ -523,32 +545,38 @@ function renderWaveformPanel(rect: Rect, title: string, waveforms: readonly Deri
   const timeAxis = reportTimeAxis(ordered);
   const plotTop = rect.y + 56;
   const rowHeight = (rect.height - 116) / Math.max(1, ordered.length);
-  const plotWidth = rect.width - 82 - 215;
+  const annotationWidth = 168;
+  const plotWidth = rect.width - 82 - annotationWidth;
   let timeMin = Infinity;
   let timeMax = -Infinity;
   let sharedMaxAbs = 0;
   ordered.forEach((waveform) => {
     const values = quantityValues(waveform, quantity);
-    const count = Math.min(waveform.time.length, values.length);
     const offset = timeAxis.offsetsByRecordId.get(waveform.sourceRecordId) ?? 0;
-    for (let index = 0; index < count; index += 1) {
+    for (let index = 0; index < waveform.time.length; index += 1) {
       const time = waveform.time[index] + offset;
-      if (!Number.isFinite(time) || !Number.isFinite(values[index])) continue;
-      timeMin = Math.min(timeMin, time);
-      timeMax = Math.max(timeMax, time);
-      sharedMaxAbs = Math.max(sharedMaxAbs, Math.abs(values[index]));
+      if (Number.isFinite(time)) {
+        timeMin = Math.min(timeMin, time);
+        timeMax = Math.max(timeMax, time);
+      }
+      if (Number.isFinite(values[index])) sharedMaxAbs = Math.max(sharedMaxAbs, Math.abs(values[index]));
     }
   });
   if (!Number.isFinite(timeMin) || !Number.isFinite(timeMax)) [timeMin, timeMax] = [0, 1];
   if (timeMin === timeMax) timeMax = timeMin + 1;
-  sharedMaxAbs = Math.max(sharedMaxAbs, 1e-12);
+  sharedMaxAbs = publicationSymmetricLimit(Math.max(sharedMaxAbs, 1e-12));
   const timeDomain: [number, number] = [timeMin, timeMax];
-  const axisTicks = linearTicks(timeMin, timeMax, 6);
+  const axisTicks = linearTicks(timeMin, timeMax, 9);
   const axisX = rect.x + 82;
-  const axisY = rect.y + rect.height - 38;
+  const axisY = rect.y + rect.height - 48;
 
   return card(rect, title, (
-    <g>
+    <g
+      data-report-waveform-quantity={quantity}
+      data-report-time-min={Number(timeDomain[0].toPrecision(12))}
+      data-report-time-max={Number(timeDomain[1].toPrecision(12))}
+      data-report-symmetric-limit={Number(sharedMaxAbs.toPrecision(12))}
+    >
       {ordered.length > 0 && (
         <text x={rect.x + rect.width} y={rect.y + SECTION_FONT} textAnchor="end" fontSize={SUPPORT_FONT} fontWeight="600" fill="#52606d">
           Shared ordinate ±{formatSignificant(sharedMaxAbs)} {quantityUnit(quantity)}
@@ -567,9 +595,10 @@ function renderWaveformPanel(rect: Rect, title: string, waveforms: readonly Deri
         const offset = timeAxis.offsetsByRecordId.get(waveform.sourceRecordId) ?? 0;
         const alignedTime = offset === 0 ? waveform.time : waveform.time.map((value) => value + offset);
         const peak = maxAbsWithTime(values, alignedTime);
-        const style = componentSeriesStyle(waveform.component, index);
+        const style = reportComponentStyle(waveform.component, index);
+        const quantitySymbol = quantity === 'acceleration' ? 'a' : quantity === 'velocity' ? 'v' : 'd';
         return (
-          <g key={`${quantity}-${waveform.sourceRecordId}`}>
+          <g key={`${quantity}-${waveform.sourceRecordId}`} data-report-waveform-component={waveform.component} data-report-waveform-row-quantity={quantity}>
             <text x={rect.x + 2} y={rowRect.y + rowRect.height / 2 + BODY_FONT * 0.35} fontSize={BODY_FONT} fontWeight="700" fill="#263640">{waveform.componentLabel}</text>
             {axisTicks.slice(1, -1).map((tick) => {
               const x = scaleLinear(tick, timeMin, timeMax, rowRect.x, rowRect.x + rowRect.width);
@@ -577,6 +606,21 @@ function renderWaveformPanel(rect: Rect, title: string, waveforms: readonly Deri
             })}
             <line x1={rowRect.x} y1={rowRect.y + rowRect.height / 2} x2={rowRect.x + rowRect.width} y2={rowRect.y + rowRect.height / 2} stroke="#8b959e" strokeWidth={MIN_LINE} />
             <line x1={rowRect.x} y1={rowRect.y} x2={rowRect.x} y2={rowRect.y + rowRect.height} stroke="#263640" strokeWidth={AXIS_LINE} />
+            {[rowRect.y, rowRect.y + rowRect.height / 2, rowRect.y + rowRect.height].map((y, tickIndex) => (
+              <g key={`${waveform.sourceRecordId}-y-tick-${tickIndex}`}>
+                <line x1={rowRect.x - 5} y1={y} x2={rowRect.x} y2={y} stroke="#263640" strokeWidth={AXIS_LINE} />
+                <text
+                  x={rowRect.x - 9}
+                  y={y + SUPPORT_FONT * (tickIndex === 0 ? 0.92 : tickIndex === 1 ? 0.34 : -0.12)}
+                  textAnchor="end"
+                  fontSize={SUPPORT_FONT}
+                  fill="#52606d"
+                  data-report-waveform-ordinate-label={tickIndex === 0 ? 'positive-limit' : tickIndex === 1 ? 'zero' : 'negative-limit'}
+                >
+                  {formatTick(tickIndex === 0 ? sharedMaxAbs : tickIndex === 1 ? 0 : -sharedMaxAbs)}
+                </text>
+              </g>
+            ))}
             <path
               d={timePath(alignedTime, values, rowRect, sharedMaxAbs, timeDomain)}
               fill="none"
@@ -587,10 +631,10 @@ function renderWaveformPanel(rect: Rect, title: string, waveforms: readonly Deri
               strokeLinejoin="round"
             />
             <text x={rowRect.x + rowRect.width + 14} y={rowRect.y + rowRect.height / 2 - 2} fontSize={SUPPORT_FONT} fontWeight="700" fill="#374151">
-              Peak {formatSignificant(peak.value)} {quantityUnit(quantity)}
+              max |{quantitySymbol}| = {formatSignificant(peak.value)} {quantityUnit(quantity)}
             </text>
             <text x={rowRect.x + rowRect.width + 14} y={rowRect.y + rowRect.height / 2 + SUPPORT_FONT + 4} fontSize={SUPPORT_FONT} fill="#52606d">
-              t = {formatNumber(peak.time, sampleTimeDigits(waveform.dt))} s
+              at t = {formatNumber(peak.time, sampleTimeDigits(waveform.dt))} s
             </text>
           </g>
         );
@@ -625,13 +669,31 @@ function renderSpectrumPanel(
   yLabel: string,
   yScale: 'linear' | 'log',
   clipId: string,
+  geometry: 'fill' | 'square' = 'fill',
 ): JSX.Element {
-  const plot: Rect = { x: rect.x + 82, y: rect.y + 96, width: rect.width - 108, height: rect.height - 170 };
+  const squareSize = Math.min(rect.width - 132, rect.height - 156);
+  const plot: Rect = geometry === 'square'
+    ? { x: rect.x + 92, y: rect.y + 84, width: squareSize, height: squareSize }
+    : { x: rect.x + 82, y: rect.y + 96, width: rect.width - 108, height: rect.height - 170 };
   const xTicks = logTicks(xDomain[0], xDomain[1]);
   const xMajorTicks = decadeTicks(xDomain[0], xDomain[1]);
   const yTicks = yScale === 'log' ? decadeTicks(yDomain[0], yDomain[1]) : linearTicks(yDomain[0], yDomain[1], 5);
+  const visiblePositiveValues = series.flatMap((entry) => entry.y.filter((value, index) => (
+    Number.isFinite(value) && value > 0 && entry.x[index] >= xDomain[0] && entry.x[index] <= xDomain[1]
+  )));
+  const visiblePositiveMinimum = visiblePositiveValues.length > 0 ? Math.min(...visiblePositiveValues) : undefined;
+  const visiblePositiveMaximum = visiblePositiveValues.length > 0 ? Math.max(...visiblePositiveValues) : undefined;
+  const yDomainIncludesVisibleRange = visiblePositiveMinimum === undefined || visiblePositiveMaximum === undefined
+    || (yDomain[0] <= visiblePositiveMinimum && yDomain[1] >= visiblePositiveMaximum);
   return card(rect, title, (
-    <g>
+    <g
+      data-spectrum-panel={clipId}
+      data-spectrum-y-min={Number(yDomain[0].toPrecision(12))}
+      data-spectrum-y-max={Number(yDomain[1].toPrecision(12))}
+      data-spectrum-positive-min={visiblePositiveMinimum === undefined ? undefined : Number(visiblePositiveMinimum.toPrecision(12))}
+      data-spectrum-positive-max={visiblePositiveMaximum === undefined ? undefined : Number(visiblePositiveMaximum.toPrecision(12))}
+      data-spectrum-y-domain-includes-positive-range={yDomainIncludesVisibleRange ? 'true' : 'false'}
+    >
       <defs><clipPath id={clipId}><rect x={plot.x} y={plot.y} width={plot.width} height={plot.height} /></clipPath></defs>
       <text x={rect.x + rect.width} y={rect.y + SECTION_FONT} textAnchor="end" fontSize={SUPPORT_FONT} fontWeight="600" fill="#52606d">{subtitle}</text>
       <g transform={`translate(${plot.x} ${rect.y + 63})`}>
@@ -673,8 +735,8 @@ function renderSpectrumPanel(
           <path key={`${clipId}-${entry.name}`} d={seriesPath(entry, plot, xDomain, yDomain, yScale)} fill="none" stroke={entry.color} strokeWidth={DATA_LINE} strokeDasharray={entry.dashArray} strokeLinecap="round" strokeLinejoin="round" />
         ))}
       </g>
-      <text x={plot.x + plot.width / 2} y={rect.y + rect.height - 8} textAnchor="middle" fontSize={AXIS_FONT} fontWeight="700" fill="#263640">{xLabel}</text>
-      <text x={rect.x + 18} y={plot.y + plot.height / 2} textAnchor="middle" fontSize={AXIS_FONT} fontWeight="700" fill="#263640" transform={`rotate(-90 ${rect.x + 18} ${plot.y + plot.height / 2})`}>{yLabel}</text>
+      <text x={plot.x + plot.width / 2} y={geometry === 'square' ? plot.y + plot.height + 55 : rect.y + rect.height - 8} textAnchor="middle" fontSize={AXIS_FONT} fontWeight="700" fill="#263640">{xLabel}</text>
+      <text x={geometry === 'square' ? rect.x + 22 : rect.x + 18} y={plot.y + plot.height / 2} textAnchor="middle" fontSize={AXIS_FONT} fontWeight="700" fill="#263640" transform={`rotate(-90 ${geometry === 'square' ? rect.x + 22 : rect.x + 18} ${plot.y + plot.height / 2})`}>{yLabel}</text>
     </g>
   ));
 }
@@ -790,15 +852,54 @@ function renderMetricStrip(
   );
 }
 
-function renderTripartitePanel(rect: Rect, series: readonly SeriesSpec[], settings: ResponseSpectrumSettings): JSX.Element {
-  const plotSize = Math.min(rect.width - 150, rect.height - 150);
-  const plot: Rect = { x: rect.x + 104, y: rect.y + 84, width: plotSize, height: plotSize };
+function renderTripartitePanel(
+  rect: Rect,
+  series: readonly SeriesSpec[],
+  settings: ResponseSpectrumSettings,
+  title = '(b) Tripartite response spectrum: pSv',
+  subtitle = `h = ${(settings.dampingRatio * 100).toFixed(1)}% · major-decade guides`,
+): JSX.Element {
   const { xDomain, yDomain } = tripartiteDomains(series, settings);
+  const plotSize = Math.min(rect.width - 132, rect.height - 156);
+  const xDecades = Math.log10(xDomain[1] / xDomain[0]);
+  const yDecades = Math.log10(yDomain[1] / yDomain[0]);
+  const exactPlotWidth = plotSize * Math.min(1, xDecades / Math.max(xDecades, yDecades));
+  const geometryPreserved = exactPlotWidth >= plotSize * 0.55;
+  const plotWidth = geometryPreserved ? exactPlotWidth : plotSize;
+  const plot: Rect = {
+    x: rect.x + 92 + (plotSize - plotWidth) / 2,
+    y: rect.y + 84,
+    width: plotWidth,
+    height: plotSize,
+  };
   const xTicks = logTicks(xDomain[0], xDomain[1]);
   const yTicks = logTicks(yDomain[0], yDomain[1]);
   const majorPeriods = decadeTicks(xDomain[0], xDomain[1]);
   const psvGuides = decadeTicks(yDomain[0], yDomain[1]);
   const diagonalValues = decadeTicks(yDomain[0] / 100, yDomain[1] * 100);
+  const accelerationLabelPsv = yDomain[1] / 1.35;
+  const displacementLabelPsv = yDomain[0] * 1.35;
+  const accelerationGuideCandidates = geometryPreserved ? diagonalValues.map((value) => ({
+    value,
+    period: (2 * Math.PI * accelerationLabelPsv) / value,
+    psv: accelerationLabelPsv,
+  })).filter((label) => label.period >= xDomain[0] && label.period <= xDomain[1]).slice(0, 3) : [];
+  const displacementGuideCandidates = geometryPreserved ? diagonalValues.map((value) => ({
+    value,
+    period: (2 * Math.PI * value) / displacementLabelPsv,
+    psv: displacementLabelPsv,
+  })).filter((label) => label.period >= xDomain[0] && label.period <= xDomain[1]).slice(0, 3) : [];
+  // Keep labels on their physical guide lines while stepping them away from a
+  // shared edge. The stagger avoids collisions in an A4 export without adding
+  // leader lines or obscuring response curves.
+  const accelerationGuideLabels = accelerationGuideCandidates.map((label, index) => {
+    const psv = accelerationLabelPsv / (10 ** (index * 0.13));
+    return { ...label, period: (2 * Math.PI * psv) / label.value, psv };
+  }).filter((label) => label.period >= xDomain[0] && label.period <= xDomain[1]);
+  const displacementGuideLabels = displacementGuideCandidates.map((label, index) => {
+    const psv = displacementLabelPsv * (10 ** (index * 0.13));
+    return { ...label, period: (2 * Math.PI * label.value) / psv, psv };
+  }).filter((label) => label.period >= xDomain[0] && label.period <= xDomain[1]);
   const clipId = 'report-tripartite-clip';
   const guidePath = (points: Array<[number, number]>): string => points.map(([xValue, yValue], index) => {
     const x = scaleLog(xValue, xDomain[0], xDomain[1], plot.x, plot.x + plot.width);
@@ -806,10 +907,18 @@ function renderTripartitePanel(rect: Rect, series: readonly SeriesSpec[], settin
     return `${index === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`;
   }).join(' ');
 
-  return card(rect, '(b) Tripartite response spectrum: pSv', (
-    <g>
+  return card(rect, title, (
+    <g
+      data-tripartite-equal-log-decades={geometryPreserved ? 'true' : 'false'}
+      data-tripartite-geometry-preserved={geometryPreserved ? 'true' : 'false'}
+      data-tripartite-guide-units="Sa:cm/s²;Sd:cm"
+      data-tripartite-sa-guide-labels={accelerationGuideLabels.length}
+      data-tripartite-sd-guide-labels={displacementGuideLabels.length}
+      data-tripartite-period-min={Number(xDomain[0].toPrecision(12))}
+      data-tripartite-period-max={Number(xDomain[1].toPrecision(12))}
+    >
       <defs><clipPath id={clipId}><rect x={plot.x} y={plot.y} width={plot.width} height={plot.height} /></clipPath></defs>
-      <text x={rect.x + rect.width} y={rect.y + SECTION_FONT} textAnchor="end" fontSize={SUPPORT_FONT} fontWeight="700" fill="#52606d">h = {(settings.dampingRatio * 100).toFixed(1)}% · major-decade guides</text>
+      <text x={rect.x + rect.width} y={rect.y + SECTION_FONT} textAnchor="end" fontSize={SUPPORT_FONT} fontWeight="700" fill="#52606d">{subtitle}</text>
       <g transform={`translate(${plot.x} ${rect.y + 56})`}>
         {series.map((entry, index) => (
           <g key={`trip-legend-${entry.name}`} transform={`translate(${index * 130} 0)`}>
@@ -828,7 +937,7 @@ function renderTripartitePanel(rect: Rect, series: readonly SeriesSpec[], settin
           const y = scaleLog(value, yDomain[0], yDomain[1], plot.y + plot.height, plot.y);
           return <line key={`trip-psv-${value}`} x1={plot.x} y1={y} x2={plot.x + plot.width} y2={y} stroke="#d0d6db" strokeWidth={MIN_LINE} />;
         })}
-        {diagonalValues.map((value) => (
+        {geometryPreserved && diagonalValues.map((value) => (
           <g key={`trip-diagonal-${value}`}>
             <path d={guidePath([[xDomain[0], (value * xDomain[0]) / (2 * Math.PI)], [xDomain[1], (value * xDomain[1]) / (2 * Math.PI)]])} fill="none" stroke="#e0e4e7" strokeWidth={MIN_LINE} strokeDasharray="5 5" />
             <path d={guidePath([[xDomain[0], (value * 2 * Math.PI) / xDomain[0]], [xDomain[1], (value * 2 * Math.PI) / xDomain[1]]])} fill="none" stroke="#e0e4e7" strokeWidth={MIN_LINE} strokeDasharray="5 5" />
@@ -838,6 +947,24 @@ function renderTripartitePanel(rect: Rect, series: readonly SeriesSpec[], settin
           <path key={`trip-series-${entry.name}`} d={seriesPath(entry, plot, xDomain, yDomain, 'log')} fill="none" stroke={entry.color} strokeWidth={DATA_LINE * 1.18} strokeDasharray={entry.dashArray} strokeLinecap="round" strokeLinejoin="round" />
         ))}
       </g>
+      {accelerationGuideLabels.map((label) => {
+        const x = scaleLog(label.period, xDomain[0], xDomain[1], plot.x, plot.x + plot.width);
+        const y = scaleLog(label.psv, yDomain[0], yDomain[1], plot.y + plot.height, plot.y);
+        return (
+          <text key={`trip-sa-label-${label.value}`} x={x} y={y} textAnchor="middle" fontSize={SUPPORT_FONT} fontWeight="700" fill="#7a858e" stroke="#ffffff" strokeWidth={MIN_LINE * 2.5} paintOrder="stroke" transform={`rotate(-45 ${x} ${y})`}>
+            Sa {formatTick(label.value)}
+          </text>
+        );
+      })}
+      {displacementGuideLabels.map((label) => {
+        const x = scaleLog(label.period, xDomain[0], xDomain[1], plot.x, plot.x + plot.width);
+        const y = scaleLog(label.psv, yDomain[0], yDomain[1], plot.y + plot.height, plot.y);
+        return (
+          <text key={`trip-sd-label-${label.value}`} x={x} y={y} textAnchor="middle" fontSize={SUPPORT_FONT} fontWeight="700" fill="#7a858e" stroke="#ffffff" strokeWidth={MIN_LINE * 2.5} paintOrder="stroke" transform={`rotate(45 ${x} ${y})`}>
+            Sd {formatTick(label.value)}
+          </text>
+        );
+      })}
       {xTicks.map((tick) => {
         const x = scaleLog(tick, xDomain[0], xDomain[1], plot.x, plot.x + plot.width);
         return (
@@ -857,8 +984,8 @@ function renderTripartitePanel(rect: Rect, series: readonly SeriesSpec[], settin
         );
       })}
       <text x={plot.x + plot.width / 2} y={plot.y + plot.height + 55} textAnchor="middle" fontSize={AXIS_FONT} fontWeight="700" fill="#263640">Period [s]</text>
-      <text x={rect.x + 28} y={plot.y + plot.height / 2} textAnchor="middle" fontSize={AXIS_FONT} fontWeight="700" fill="#263640" transform={`rotate(-90 ${rect.x + 28} ${plot.y + plot.height / 2})`}>pSv [cm/s]</text>
-      <text x={plot.x + plot.width - 4} y={plot.y + 20} textAnchor="end" fontSize={SUPPORT_FONT} fill="#6b7280">diagonal: constant Sa / Sd</text>
+      <text x={rect.x + 22} y={plot.y + plot.height / 2} textAnchor="middle" fontSize={AXIS_FONT} fontWeight="700" fill="#263640" transform={`rotate(-90 ${rect.x + 22} ${plot.y + plot.height / 2})`}>pSv [cm/s]</text>
+      <text x={rect.x + rect.width} y={rect.y + rect.height - 8} textAnchor="end" fontSize={SUPPORT_FONT} fill="#6b7280">{geometryPreserved ? 'Guide labels: Sa [cm/s²] / Sd [cm]' : 'Sa/Sd guides omitted: pSv span exceeds equal-decade geometry'}</text>
     </g>
   ));
 }
@@ -874,7 +1001,7 @@ function reportFourierEntries(waveforms: readonly DerivedWaveform[]): ReportFour
       bandwidthHz: REPORT_PARZEN_BANDWIDTH_HZ,
       dcAmplitude: analysis.metadata.dcAmplitude,
     });
-    const style = componentSeriesStyle(waveform.component, index);
+    const style = reportComponentStyle(waveform.component, index);
     return {
       waveform,
       analysis,
@@ -891,7 +1018,7 @@ function reportFourierEntries(waveforms: readonly DerivedWaveform[]): ReportFour
 }
 
 function commonFourierBand(entries: readonly ReportFourierEntry[]): [number, number] {
-  const lower = Math.max(0.1, ...entries.map((entry) => Math.max(
+  const lower = Math.max(1e-3, ...entries.map((entry) => Math.max(
     entry.analysis.metadata.firstPositiveFrequencyHz,
     entry.analysis.metadata.independentResolutionHz,
     entry.waveform.preprocessing?.applyHighpass ? entry.waveform.preprocessing.highpassHz : 0,
@@ -910,8 +1037,9 @@ function logYDomain(series: readonly SeriesSpec[], xDomain: [number, number]): [
     Number.isFinite(value) && value > 0 && entry.x[index] >= xDomain[0] && entry.x[index] <= xDomain[1]
   )));
   if (values.length === 0) return [1e-4, 1];
+  const minimum = Math.min(...values);
   const maximum = Math.max(...values);
-  return [niceLogFloor(maximum / 1e4, 1e-4), niceLogCeil(maximum * 1.05, 1)];
+  return [niceLogFloor(Math.min(minimum, maximum / 1e4), 1e-4), niceLogCeil(maximum * 1.05, 1)];
 }
 
 function linearYDomain(series: readonly SeriesSpec[]): [number, number] {
@@ -926,11 +1054,12 @@ function finiteXDomain(series: readonly SeriesSpec[]): [number, number] | undefi
   return values.length > 1 ? [Math.min(...values), Math.max(...values)] : undefined;
 }
 
-export function ReportFigurePanel({ waveforms, jmaWaveforms, peaks, responseSettings, initialPage = 'summary' }: ReportFigurePanelProps): JSX.Element {
+export function ReportFigurePanel({ waveforms, jmaWaveforms, peaks, responseSettings, initialPage = 'integrated' }: ReportFigurePanelProps): JSX.Element {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const stations = useMemo(() => buildReportStations(waveforms, peaks), [waveforms, peaks]);
   const [stationId, setStationId] = useState<string>('');
   const [page, setPage] = useState<ReportPage>(initialPage);
+  const [grayscale, setGrayscale] = useState(false);
   const selectedStation = stations.find((station) => station.id === (stationId || stations[0]?.id)) ?? stations[0];
   const selectedWaveforms = useMemo(
     () => selectedStation?.waveforms.slice().sort((a, b) => componentRank(a.component) - componentRank(b.component)) ?? [],
@@ -959,6 +1088,15 @@ export function ReportFigurePanel({ waveforms, jmaWaveforms, peaks, responseSett
   const saComputedPeriodDomain = useMemo(() => finiteXDomain(saResponse), [saResponse]);
   const saPeriodDomain = saComputedPeriodDomain ?? [responseSettings.minPeriod, responseSettings.maxPeriod] as [number, number];
   const saYDomain = useMemo(() => linearYDomain(saResponse), [saResponse]);
+  const psvTripartiteDomains = useMemo(
+    () => tripartiteDomains(psvResponse, reportResponseSettings),
+    [psvResponse, reportResponseSettings],
+  );
+  const psvTripartiteGeometryPreserved = useMemo(() => {
+    const xDecades = Math.log10(psvTripartiteDomains.xDomain[1] / psvTripartiteDomains.xDomain[0]);
+    const yDecades = Math.log10(psvTripartiteDomains.yDomain[1] / psvTripartiteDomains.yDomain[0]);
+    return xDecades / Math.max(xDecades, yDecades) >= 0.55;
+  }, [psvTripartiteDomains]);
   const timeAxis = useMemo(() => reportTimeAxis(selectedWaveforms), [selectedWaveforms]);
   const consistency = useMemo(() => componentConsistency(selectedWaveforms), [selectedWaveforms]);
   const provenance = useMemo(() => buildFigureProvenance(selectedWaveforms), [selectedWaveforms]);
@@ -972,6 +1110,16 @@ export function ReportFigurePanel({ waveforms, jmaWaveforms, peaks, responseSett
   const pgv = metricPeak(selectedPeaks, 'pgv');
   const pgd = metricPeak(selectedPeaks, 'pgd');
   const duration = recordDurationSeconds(selectedWaveforms);
+  const componentDurations = unique(selectedWaveforms.map((waveform) => {
+    const first = waveform.time[0];
+    const last = waveform.time[waveform.time.length - 1];
+    return isFiniteNumber(first) && isFiniteNumber(last) && last >= first
+      ? Number((last - first).toPrecision(8))
+      : undefined;
+  }).filter(isFiniteNumber));
+  const fasIntervalLabel = componentDurations.length === 1
+    ? `0–${formatSignificant(componentDurations[0])} s`
+    : 'full records · durations vary';
   const stationHeight = sharedMetadataNumber(selectedWaveforms, 'stationHeightM');
   const magnitude = sharedMetadataNumber(selectedWaveforms, 'magnitude');
   const originTime = sharedMetadataText(selectedWaveforms, 'originTime');
@@ -986,17 +1134,59 @@ export function ReportFigurePanel({ waveforms, jmaWaveforms, peaks, responseSett
   const velocityPanelTitle = consistency.completeThreeComponentSet
     ? '(a) Three-component velocity'
     : `(a) Velocity · ${consistency.observedComponents.join(' / ') || 'unlabelled'}`;
+  const integratedVelocityPanelTitle = consistency.completeThreeComponentSet
+    ? '(b) Three-component velocity'
+    : `(b) Velocity · ${consistency.observedComponents.join(' / ') || 'unlabelled'}`;
+  const pageTitle = page === 'integrated'
+    ? 'Integrated strong-motion report'
+    : page === 'summary'
+      ? 'Strong-motion engineering summary'
+      : 'Strong-motion technical detail';
+  const pageToolbarLabel = page === 'integrated'
+    ? 'Integrated analysis plate'
+    : page === 'summary'
+      ? 'Executive summary'
+      : 'Technical detail';
+  const pageDescription = page === 'integrated'
+    ? 'Single-page A4 report with aligned three-component acceleration and velocity histories above side-by-side Parzen-smoothed Fourier amplitude and five-percent-damped tripartite pseudo-velocity response spectra.'
+    : page === 'summary'
+      ? 'A4 executive report with event and station metadata, a source-station locator, key ground-motion metrics, three-component acceleration, Parzen-smoothed Fourier amplitude spectra, and five-percent-damped acceleration response spectra.'
+      : 'A4 technical appendix with three-component velocity and a large five-percent-damped tripartite pseudo-spectral velocity response spectrum.';
   const fileNameBase = safeFileName(`report_${page}_${selectedStation.label}`);
-  const preprocessingLabels = unique(selectedWaveforms.map((waveform) => waveform.preprocessing ? preprocessingLabel(waveform.preprocessing) : 'unavailable'));
-  const preprocessingFooter = preprocessingLabels.length === 1 ? preprocessingLabels[0] : 'varies by component; see Methods JSON';
+  const accelerationProcessingLabels = unique(selectedWaveforms.map((waveform) => {
+    const settings = waveform.preprocessing;
+    if (!settings) return 'settings unavailable';
+    const operations: string[] = [];
+    if (settings.removeMean) operations.push('mean removed');
+    if (settings.detrend) operations.push('detrended');
+    if (settings.applyHighpass) operations.push(`HP ${formatSignificant(settings.highpassHz)} Hz`);
+    if (settings.applyLowpass) operations.push(`LP ${formatSignificant(settings.lowpassHz)} Hz`);
+    return operations.length > 0 ? operations.join('; ') : 'no mean/trend/frequency filter';
+  }));
+  const accelerationProcessingFooter = accelerationProcessingLabels.length === 1
+    ? accelerationProcessingLabels[0]
+    : 'varies by component; see Methods JSON';
+  const velocityProcessingLabels = unique(selectedWaveforms.map((waveform) => waveform.preprocessing
+    ? `derived quantity; integration drift correction ${waveform.preprocessing.correctIntegrationDrift ? 'enabled' : 'disabled'}`
+    : 'derived quantity; drift setting unavailable'));
+  const velocityProcessingFooter = velocityProcessingLabels.length === 1
+    ? velocityProcessingLabels[0]
+    : 'varies by component; see Methods JSON';
   const reportMetadata = {
-    schema: 'strong-motion-engineering-report/2.0',
+    schema: 'strong-motion-engineering-report/3.0',
     pageDesign: {
-      availablePlates: ['summary', 'technical'],
+      availablePlates: ['integrated', 'summary', 'technical'],
       selectedPlate: page,
+      defaultPlate: 'integrated',
       reportSizeMm: [210, 297],
       minimumTypographyPt: 7.5,
       minimumLineWeightPt: 0.5,
+      integratedPanelOrder: ['acceleration', 'velocity', 'Parzen Fourier amplitude spectrum', 'tripartite pSv response spectrum'],
+      renderedPanels: page === 'integrated'
+        ? ['acceleration', 'velocity', 'Parzen Fourier amplitude spectrum', 'tripartite pSv response spectrum']
+        : page === 'summary'
+          ? ['event/station metadata', 'source-station locator', 'ground-motion metrics', 'acceleration', 'Parzen Fourier amplitude spectrum', 'acceleration response spectrum Sa']
+          : ['velocity', 'tripartite pSv response spectrum'],
     },
     recordSet: selectedStation.label,
     sourceFiles: selectedWaveforms.map((waveform) => waveform.fileName),
@@ -1022,10 +1212,22 @@ export function ReportFigurePanel({ waveforms, jmaWaveforms, peaks, responseSett
     waveformPanels: {
       input: 'active preprocessing',
       sharedOrdinateWithinPanel: true,
+      sharedTimeAxisAcrossAccelerationAndVelocity: true,
+      peakDefinition: 'maximum absolute sample magnitude; the displayed value is non-negative and its occurrence time is reported',
       peakLabelsOutsideDataRegion: true,
+    },
+    componentEncoding: {
+      NS: { colour: REPORT_COMPONENT_STYLES.NS.color, line: 'solid' },
+      EW: { colour: REPORT_COMPONENT_STYLES.EW.color, line: REPORT_COMPONENT_STYLES.EW.dashArray },
+      UD: { colour: REPORT_COMPONENT_STYLES.UD.color, line: REPORT_COMPONENT_STYLES.UD.dashArray },
+      identificationDoesNotDependOnColourAlone: true,
     },
     fourierAmplitudeSpectrum: {
       input: 'active preprocessed acceleration',
+      displayYAxisLabel: 'Acceleration FAS |A(f)| [cm/s]',
+      displayUnitEquivalence: 'cm/s = cm/s²·s',
+      displayedRecordInterval: fasIntervalLabel,
+      componentDurationsSeconds: componentDurations,
       meanRemoved: true,
       timeWindow: '5% cosine edge taper',
       amplitudeDefinition: '|DFT| * dt; positive-frequency half-spectrum; one-sided factor 1; no record-length or window-gain normalization',
@@ -1062,9 +1264,11 @@ export function ReportFigurePanel({ waveforms, jmaWaveforms, peaks, responseSett
       })),
       summaryOrdinate: 'absolute acceleration response Sa [cm/s²]',
       technicalOrdinate: 'pseudo-spectral velocity pSv [cm/s]',
-      technicalTripartiteDisplayDomains: tripartiteDomains(psvResponse, reportResponseSettings),
+      technicalTripartiteDisplayDomains: psvTripartiteDomains,
+      tripartiteEqualDecadeGeometryPreserved: psvTripartiteGeometryPreserved,
     },
     locator: {
+      visibleOnSelectedPlate: page === 'summary',
       type: 'tile-independent source-station schematic',
       projection: 'local equirectangular; x=(longitude-longitude0)*111.32*cos(mean latitude) km; y=(latitude-latitude0)*111.32 km',
       equalKilometreScale: true,
@@ -1086,22 +1290,24 @@ export function ReportFigurePanel({ waveforms, jmaWaveforms, peaks, responseSett
         <label>
           Report plate
           <select value={page} onChange={(event) => setPage(event.target.value as ReportPage)}>
+            <option value="integrated">Integrated plate · Acc / Vel / FAS / pSv</option>
             <option value="summary">Page 1 · Executive summary</option>
             <option value="technical">Page 2 · Technical detail</option>
           </select>
         </label>
-        <span className="note">Page 1 prioritises acceleration, Parzen FAS, and 5%-damped Sa. Page 2 separates velocity and tripartite detail.</span>
+        <span className="note">The integrated plate follows the reference layout on one A4 page. The original executive and technical plates remain available for presentation-specific exports.</span>
         {consistency.status === 'review-required' && <span className="note warning-text">Component metadata differs: {consistency.inconsistentFields.join(', ')}. The export records every component separately.</span>}
       </div>
 
-      <figure className="chart-card publication-figure report-figure" data-report-page={page} tabIndex={0} aria-label={`A4 strong-motion report ${page} plate; horizontally scrollable on narrow screens`}>
+      <figure className={`chart-card publication-figure report-figure${grayscale ? ' grayscale-preview' : ''}`} data-report-page={page} tabIndex={0} aria-label={`A4 strong-motion report ${page} plate; horizontally scrollable on narrow screens`}>
         <div className="chart-toolbar report-toolbar">
           <div className="figure-toolbar-label">
-            <span className="figure-kicker">A4 engineering report · {page === 'summary' ? 'Page 1' : 'Page 2'}</span>
-            <strong>{page === 'summary' ? 'Executive summary' : 'Technical detail'} · {selectedStation.label}</strong>
+            <span className="figure-kicker">A4 engineering report · {page === 'integrated' ? 'Integrated plate' : page === 'summary' ? 'Page 1' : 'Page 2'}</span>
+            <strong>{pageToolbarLabel} · {selectedStation.label}</strong>
             <span className="note">210 × 297 mm · vector-first · minimum type 7.5 pt · minimum rule 0.5 pt</span>
           </div>
           <div className="button-row compact">
+            <button type="button" className="secondary" onClick={() => setGrayscale((value) => !value)}>{grayscale ? 'Colour view' : 'Grayscale check'}</button>
             <button type="button" className="secondary" aria-label="Download the selected A4 report plate as SVG" onClick={() => svgRef.current && downloadSvg(svgRef.current, `${fileNameBase}.svg`, { widthMm: 210, heightMm: 297 })}>SVG · vector</button>
             <button type="button" className="secondary" aria-label="Download the selected A4 report plate as a 300 dpi PNG" onClick={() => svgRef.current && void downloadPng(svgRef.current, `${fileNameBase}.png`, { dpi: 300, widthMm: 210, heightMm: 297 })}>PNG · 300 dpi</button>
             <button type="button" className="secondary" onClick={() => downloadFigureMetadata(`report_methods_${page}_${selectedStation.label}`, reportMetadata)}>Methods · JSON</button>
@@ -1113,6 +1319,10 @@ export function ReportFigurePanel({ waveforms, jmaWaveforms, peaks, responseSett
           className="publication-chart report-chart"
           data-min-font-pt="7.6"
           data-min-line-pt="0.5"
+          data-report-layout={page === 'integrated' ? 'acceleration-velocity-fas-tripartite' : page}
+          data-report-shared-time-axis={page === 'integrated' ? 'true' : undefined}
+          data-report-acceleration-shared-ordinate={page === 'integrated' ? 'true' : undefined}
+          data-report-velocity-shared-ordinate={page === 'integrated' ? 'true' : undefined}
           width={WIDTH}
           height={HEIGHT}
           viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
@@ -1121,17 +1331,63 @@ export function ReportFigurePanel({ waveforms, jmaWaveforms, peaks, responseSett
           preserveAspectRatio="xMidYMid meet"
           style={{ fontFamily: FONT_FAMILY }}
         >
-          <title id="report-figure-title">{`${page === 'summary' ? 'Strong-motion engineering summary' : 'Strong-motion technical detail'} for ${selectedStation.label}`}</title>
-          <desc id="report-figure-description">{page === 'summary'
-            ? 'A4 executive report with event and station metadata, a source-station locator, key ground-motion metrics, three-component acceleration, Parzen-smoothed Fourier amplitude spectra, and five-percent-damped acceleration response spectra.'
-            : 'A4 technical appendix with three-component velocity and a large five-percent-damped tripartite pseudo-spectral velocity response spectrum.'}</desc>
+          <title id="report-figure-title">{`${pageTitle} for ${selectedStation.label}`}</title>
+          <desc id="report-figure-description">{pageDescription}</desc>
           <metadata>{JSON.stringify(reportMetadata)}</metadata>
           <rect width={WIDTH} height={HEIGHT} fill="#ffffff" />
-          <text x="58" y="53" fontSize={TITLE_FONT} fontWeight="700" fill="#17212b">{page === 'summary' ? 'Strong-motion engineering summary' : 'Strong-motion technical detail'}</text>
+          <text x="58" y="53" fontSize={TITLE_FONT} fontWeight="700" fill="#17212b">{pageTitle}</text>
           <text x={WIDTH - 58} y="52" textAnchor="end" fontSize={BODY_FONT} fontWeight="700" fill="#374151">{selectedStation.label}</text>
           <line x1="58" y1="75" x2={WIDTH - 58} y2="75" stroke="#17212b" strokeWidth={AXIS_LINE} />
 
-          {page === 'summary' ? (
+          {page === 'integrated' ? (
+            <g
+              data-report-panel-order="acceleration velocity Fourier-amplitude tripartite-pSv"
+              data-report-component-encoding="NS-vermillion-solid EW-blue-dashed UD-purple-dotted"
+            >
+              <text x="58" y="101" fontSize={BODY_FONT} fontWeight="700" fill="#17212b">
+                Origin {originTime} · station {selectedStation.label} · M {isFiniteNumber(magnitude) ? magnitude.toFixed(1) : '–'} · depth {formatFixed(row?.depthKm, 1, ' km')} · Rₕᵧₚ {formatFixed(row?.hypocentralDistanceKm, 1, ' km')}
+              </text>
+              <text x="58" y="122" fontSize={SUPPORT_FONT} fontWeight="700" fill="#52606d">
+                JMA {selectedIntensity.available ? `${formatNumber(selectedIntensity.intensity, 1)} (${selectedIntensity.classLabel})` : '–'} · PGA {pga ? `${formatSignificant(pga.value)} cm/s²` : '–'} · PGV {pgv ? `${formatSignificant(pgv.value)} cm/s` : '–'} · duration {isFiniteNumber(duration) ? `${formatSignificant(duration)} s` : '–'} · {consistencyLabel}
+              </text>
+              {renderWaveformPanel({ x: 58, y: 142, width: 1004, height: 338 }, accelerationPanelTitle, selectedWaveforms, 'acceleration')}
+              {renderWaveformPanel({ x: 58, y: 516, width: 1004, height: 354 }, integratedVelocityPanelTitle, selectedWaveforms, 'velocity')}
+              {renderSpectrumPanel(
+                { x: 58, y: 910, width: 486, height: 530 },
+                '(c) Fourier amplitude',
+                `Parzen B=${REPORT_PARZEN_BANDWIDTH_HZ.toFixed(2)} Hz · ${fasIntervalLabel}`,
+                fourierSeries,
+                fourierBand,
+                fourierYDomain,
+                'Frequency [Hz]',
+                'Acceleration FAS |A(f)| [cm/s]',
+                'log',
+                'report-integrated-fas-clip',
+                'square',
+              )}
+              {renderTripartitePanel(
+                { x: 576, y: 910, width: 486, height: 530 },
+                psvResponse,
+                reportResponseSettings,
+                '(d) Tripartite pSv response',
+                'h = 5.0% · Sa/Sd guides',
+              )}
+              <line x1="58" y1="1465" x2={WIDTH - 58} y2="1465" stroke="#7b8790" strokeWidth={MIN_LINE} />
+              <text x="58" y="1487" fontSize={SUPPORT_FONT} fontWeight="600" fill="#52606d">
+                Acceleration: {accelerationProcessingFooter}.
+              </text>
+              <text x="58" y="1506" fontSize={SUPPORT_FONT} fontWeight="600" fill="#52606d">
+                Velocity: {velocityProcessingFooter}.
+              </text>
+              <text x="58" y="1525" fontSize={SUPPORT_FONT} fontWeight="600" fill="#52606d">
+                Common time axis: {timeAxis.reference}. FAS: mean removed; 5% cosine taper; |DFT|Δt; Parzen B=0.10 Hz.
+              </text>
+              <text x="58" y="1544" fontSize={SUPPORT_FONT} fontWeight="600" fill="#52606d">
+                JMA: original acceleration. Response: Nigam–Jennings pSv, h=5.0%; {psvTripartiteGeometryPreserved ? 'equal-decade Sa/Sd guides.' : 'Sa/Sd guides omitted.'}
+              </text>
+              <text x={WIDTH - 58} y="1544" textAnchor="end" fontSize={SUPPORT_FONT} fill="#6b7280">1 / 1</text>
+            </g>
+          ) : page === 'summary' ? (
             <g>
               {card({ x: 58, y: 92, width: 646, height: 194 }, 'Event / station', (
                 <g>
@@ -1181,10 +1437,10 @@ export function ReportFigurePanel({ waveforms, jmaWaveforms, peaks, responseSett
               )}
               <line x1="58" y1="1471" x2={WIDTH - 58} y2="1471" stroke="#7b8790" strokeWidth={MIN_LINE} />
               <text x="58" y="1496" fontSize={SUPPORT_FONT} fontWeight="600" fill="#52606d">
-                Waveforms/FAS: active preprocessing ({preprocessingFooter}). FAS: 5% cosine taper, |DFT|Δt, Parzen power smoothing B=0.10 Hz.
+                Acceleration: {accelerationProcessingFooter}. FAS: mean removed; 5% cosine taper; |DFT|Δt; Parzen B=0.10 Hz.
               </text>
               <text x="58" y="1519" fontSize={SUPPORT_FONT} fontWeight="600" fill="#52606d">
-                JMA intensity: original acceleration. Sa: Nigam–Jennings recurrence, h=5.0%. Full per-component settings and source files are embedded and available as Methods JSON.
+                JMA: original acceleration. Sa: Nigam–Jennings, h=5.0%. Exact settings and source files: Methods JSON / SVG metadata.
               </text>
               <text x={WIDTH - 58} y="1547" textAnchor="end" fontSize={SUPPORT_FONT} fill="#6b7280">1 / 2</text>
             </g>
@@ -1196,18 +1452,20 @@ export function ReportFigurePanel({ waveforms, jmaWaveforms, peaks, responseSett
               {renderTripartitePanel({ x: 130, y: 540, width: 860, height: 850 }, psvResponse, reportResponseSettings)}
               <line x1="58" y1="1471" x2={WIDTH - 58} y2="1471" stroke="#7b8790" strokeWidth={MIN_LINE} />
               <text x="58" y="1496" fontSize={SUPPORT_FONT} fontWeight="600" fill="#52606d">
-                Velocity: active preprocessing and integration drift correction as recorded per component. Tripartite: Nigam–Jennings response, h=5.0%; major-decade guides only.
+                Velocity: {velocityProcessingFooter}. Tripartite: Nigam–Jennings response, h=5.0%; major-decade guides only.
               </text>
               <text x="58" y="1519" fontSize={SUPPORT_FONT} fontWeight="600" fill="#52606d">
-                Time reference: {timeAxis.reference}. Source files, exact preprocessing, response settings, Fourier settings, and component-consistency audit are embedded in SVG metadata.
+                Time: {timeAxis.reference}. Exact settings, source files, and consistency audit: Methods JSON / SVG metadata.
               </text>
               <text x={WIDTH - 58} y="1547" textAnchor="end" fontSize={SUPPORT_FONT} fill="#6b7280">2 / 2</text>
             </g>
           )}
         </svg>
-        <figcaption className="chart-caption">{page === 'summary'
-          ? 'Executive A4 plate: metadata and locator, key metrics, acceleration, Parzen-smoothed FAS, and 5%-damped Sa. Velocity and tripartite detail are intentionally separated onto Page 2.'
-          : `Technical A4 plate: velocity and a large, hierarchy-controlled tripartite response spectrum. The time reference is ${timeAxis.reference}.`}</figcaption>
+        <figcaption className="chart-caption">{page === 'integrated'
+          ? `Integrated A4 plate: aligned acceleration and velocity histories above equal-width Parzen FAS and 5%-damped tripartite pSv panels. The time reference is ${timeAxis.reference}.`
+          : page === 'summary'
+            ? 'Executive A4 plate: metadata and locator, key metrics, acceleration, Parzen-smoothed FAS, and 5%-damped Sa. Velocity and tripartite detail are intentionally separated onto Page 2.'
+            : `Technical A4 plate: velocity and a large, hierarchy-controlled tripartite response spectrum. The time reference is ${timeAxis.reference}.`}</figcaption>
       </figure>
     </div>
   );

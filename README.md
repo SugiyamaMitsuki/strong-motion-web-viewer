@@ -116,17 +116,17 @@ https://sugiyamamitsuki.github.io/strong-motion-web-viewer/
   - Grayscale preview; colour series also use independent dash patterns
   - Explicit horizontal-swipe cue on narrow screens while the page body remains fixed to the viewport
   - 800 dpi PNG export with physical-resolution metadata and editable SVG working export
-- Report overview figure
-  - A publication-oriented A4 summary separates the executive overview from dense diagnostic plots
-  - The overview combines event/station metadata, a tile-independent locator inset, ground-motion metrics, three-component acceleration, Parzen-smoothed Fourier spectra, and 5%-damped Sa
-  - Velocity histories and the engineering tripartite spectrum remain available as a separate detail plate instead of competing with the primary results
-  - Separates events and KiK-net channel suffixes before analysis
-  - Uses a shared ordinate; parseable record timestamps are aligned to the earliest start, otherwise the component-relative time reference is stated explicitly
-  - Uses print-safe typography, line weights, margins, sparse guide lines, and data-external peak labels
-  - Exports editable SVG, exact A4-width 300 dpi PNG, and a Methods JSON containing preprocessing, Fourier, response, and provenance settings
+- Integrated A4 report figure
+  - The publication default is a single A4 portrait analysis plate: three-component acceleration histories, three-component velocity histories, and a bottom row containing a Parzen-smoothed Fourier amplitude spectrum beside a 5%-damped tripartite pSv spectrum
+  - All six histories use one aligned physical time axis; NS/EW/UD share a symmetric, nice-number ordinate within each physical quantity so component amplitudes remain directly comparable
+  - A white, print-safe background, sparse aligned time guides, data-external peak labels, and component colour plus independent line patterns preserve hierarchy in colour and greyscale
+  - Final A4 typography is at least 7.5 pt for supporting text and 8 pt for axis ticks; guide and data lines are at least 0.5 pt and 0.8 pt respectively
+  - Event/station and KiK-net channel suffixes are separated before analysis, and parseable record timestamps are aligned to the earliest start; otherwise the component-relative time reference is stated explicitly
+  - The earlier map/metrics/Sa summary and velocity/tripartite technical arrangements remain available as auxiliary plates rather than replacing the integrated default
+  - Exports editable SVG, exact A4-width 300 dpi PNG, and a Methods JSON containing component consistency, time reference, preprocessing, Parzen, response, and provenance settings; direct print preserves the same 210 × 297 mm artboard without shrinking the declared typography or line weights
 - Figure export
   - SVG working files with 180 mm physical dimensions, inlined presentation styles, and embedded method metadata
-  - 180 mm-wide 800 dpi PNG for journal charts and 210 mm-wide 300 dpi PNG for the separate A4 overview report
+  - 180 mm-wide 800 dpi PNG for journal charts and 210 mm-wide 300 dpi PNG for the integrated A4 report
   - Figure-specific Methods JSON with source records, station/event context, exact preprocessing and analysis settings, app version, and build revision
   - Colourblind-safe component palette with independent dash patterns for greyscale reproduction
   - SVG uses system Arial/Helvetica fonts; convert text to outlines or embed fonts when preparing a journal's final PDF/EPS/TIFF submission file
