@@ -1,18 +1,36 @@
 import { useMemo, useRef, useState } from 'react';
 import { computeStationDistanceRows, type StationDistanceRow } from '../analysis/distance';
+import {
+  computeFourierAnalysis,
+  DEFAULT_PARZEN_BANDWIDTH_HZ,
+  smoothFourierSpectrumParzen,
+  type FourierAnalysisResult,
+  type ParzenSmoothedFourierSpectrum,
+} from '../analysis/fourier';
 import { computeJmaIntensity } from '../analysis/jmaIntensity';
 import { computeResponseSpectra } from '../analysis/responseSpectrum';
+import { downloadFigureMetadata } from '../export/figureMetadata';
 import { downloadPng, downloadSvg } from '../export/exportImage';
-import type { DerivedWaveform, PeakSummary, Quantity, ResponseSpectrumSettings } from '../types/waveform';
+import type {
+  DerivedWaveform,
+  PeakSummary,
+  Quantity,
+  ResponseSpectrumResult,
+  ResponseSpectrumSettings,
+  WaveformMetadata,
+} from '../types/waveform';
 import { formatNumber, safeFileName } from '../utils/file';
 import { componentSeriesStyle } from '../visualization/chartStyle';
 import { downsampleSegments } from '../visualization/downsample';
+import { pointsToUserUnits } from '../visualization/journal';
+import { buildFigureProvenance, preprocessingLabel } from '../visualization/provenance';
 
 interface ReportFigurePanelProps {
   waveforms: DerivedWaveform[];
   jmaWaveforms: DerivedWaveform[];
   peaks: PeakSummary[];
   responseSettings: ResponseSpectrumSettings;
+  initialPage?: ReportPage;
 }
 
 interface Rect {
@@ -38,10 +56,12 @@ interface SeriesSpec {
   dashArray?: string;
 }
 
-const WIDTH = 1120;
-const HEIGHT = 1584;
-const FONT_FAMILY = 'Arial, Helvetica, sans-serif';
-const LOG_SNAP_STEP = 0.25;
+interface ReportFourierEntry {
+  waveform: DerivedWaveform;
+  analysis: FourierAnalysisResult;
+  smoothing: ParzenSmoothedFourierSpectrum['smoothing'];
+  series: SeriesSpec;
+}
 
 interface LogRange {
   minLog: number;
@@ -54,8 +74,41 @@ interface ReportTimeAxis {
   offsetsByRecordId: Map<string, number>;
 }
 
+interface ComponentConsistency {
+  completeThreeComponentSet: boolean;
+  observedComponents: string[];
+  consistentFields: string[];
+  inconsistentFields: string[];
+  status: 'consistent' | 'review-required';
+}
+
+type ReportPage = 'summary' | 'technical';
+
+const WIDTH = 1120;
+const HEIGHT = 1584;
+const PRINT_WIDTH_MM = 210;
+const FONT_FAMILY = 'Arial, Helvetica, sans-serif';
+const REPORT_DAMPING_RATIO = 0.05;
+const REPORT_PARZEN_BANDWIDTH_HZ = DEFAULT_PARZEN_BANDWIDTH_HZ;
+const LOG_SNAP_STEP = 0.25;
+
+// At 210 mm output width these remain at or above 7.5 pt. Lines remain at or
+// above 0.5 pt, including light guide lines.
+const SUPPORT_FONT = pointsToUserUnits(7.6, WIDTH, PRINT_WIDTH_MM);
+const BODY_FONT = pointsToUserUnits(8.2, WIDTH, PRINT_WIDTH_MM);
+const AXIS_FONT = pointsToUserUnits(8.0, WIDTH, PRINT_WIDTH_MM);
+const SECTION_FONT = pointsToUserUnits(10.2, WIDTH, PRINT_WIDTH_MM);
+const TITLE_FONT = pointsToUserUnits(15, WIDTH, PRINT_WIDTH_MM);
+const MIN_LINE = pointsToUserUnits(0.5, WIDTH, PRINT_WIDTH_MM);
+const AXIS_LINE = pointsToUserUnits(0.65, WIDTH, PRINT_WIDTH_MM);
+const DATA_LINE = pointsToUserUnits(0.9, WIDTH, PRINT_WIDTH_MM);
+
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value);
+}
+
+function unique<T>(values: readonly T[]): T[] {
+  return [...new Set(values)];
 }
 
 function parseRecordTimeMs(value: string): number | undefined {
@@ -116,6 +169,24 @@ function quantityUnit(quantity: Quantity): string {
   return 'cm';
 }
 
+function formatSignificant(value: number | undefined, digits = 3): string {
+  if (!isFiniteNumber(value)) return '-';
+  return Number(value.toPrecision(digits)).toString();
+}
+
+function formatCoordinate(value: number | undefined): string {
+  return isFiniteNumber(value) ? value.toFixed(4) : '-';
+}
+
+function formatFixed(value: number | undefined, digits: number, suffix = ''): string {
+  return isFiniteNumber(value) ? `${value.toFixed(digits)}${suffix}` : '-';
+}
+
+function sampleTimeDigits(dt: number): number {
+  if (!Number.isFinite(dt) || dt <= 0) return 2;
+  return Math.max(0, Math.min(3, Math.ceil(-Math.log10(dt) - 1e-10)));
+}
+
 function maxAbsWithTime(values: readonly number[], times: readonly number[]): { value: number; time: number } {
   let max = 0;
   let index = 0;
@@ -142,7 +213,7 @@ function metricPeak(peaks: readonly PeakSummary[], key: 'pga' | 'pgv' | 'pgd'): 
 function stationLabelFromWaveform(waveform: DerivedWaveform): string {
   const { stationCode, stationLat, stationLon } = waveform.metadata;
   if (stationCode) return stationCode;
-  if (isFiniteNumber(stationLat) && isFiniteNumber(stationLon)) return `${stationLat.toFixed(5)}, ${stationLon.toFixed(5)}`;
+  if (isFiniteNumber(stationLat) && isFiniteNumber(stationLon)) return `${stationLat.toFixed(4)}, ${stationLon.toFixed(4)}`;
   return 'Loaded waveform set';
 }
 
@@ -198,6 +269,52 @@ function buildReportStations(waveforms: readonly DerivedWaveform[], peaks: reado
   });
 }
 
+function sharedMetadataText(waveforms: readonly DerivedWaveform[], key: keyof WaveformMetadata): string {
+  const values = unique(waveforms.map((waveform) => waveform.metadata[key])
+    .filter((value): value is string | number => typeof value === 'string' ? Boolean(value.trim()) : isFiniteNumber(value))
+    .map((value) => typeof value === 'number' ? Number(value.toPrecision(10)).toString() : value.trim()));
+  if (values.length === 0) return '-';
+  return values.length === 1 ? values[0] : `Mixed (${values.length} values)`;
+}
+
+function sharedMetadataNumber(waveforms: readonly DerivedWaveform[], key: keyof WaveformMetadata): number | undefined {
+  const values = unique(waveforms.map((waveform) => waveform.metadata[key])
+    .filter(isFiniteNumber)
+    .map((value) => Number(value.toPrecision(10))));
+  return values.length === 1 ? values[0] : undefined;
+}
+
+function recordDurationSeconds(waveforms: readonly DerivedWaveform[]): number | undefined {
+  const durations = waveforms.map((waveform) => {
+    const first = waveform.time[0];
+    const last = waveform.time[waveform.time.length - 1];
+    return isFiniteNumber(first) && isFiniteNumber(last) && last >= first ? last - first : undefined;
+  }).filter(isFiniteNumber);
+  return durations.length > 0 ? Math.max(...durations) : sharedMetadataNumber(waveforms, 'durationSec');
+}
+
+function componentConsistency(waveforms: readonly DerivedWaveform[]): ComponentConsistency {
+  const components = unique(waveforms.map((waveform) => waveform.component));
+  const fields: Array<[string, string[]]> = [
+    ['station code', waveforms.map((waveform) => waveform.metadata.stationCode?.trim() ?? '')],
+    ['station coordinates', waveforms.map((waveform) => `${waveform.metadata.stationLat ?? ''}|${waveform.metadata.stationLon ?? ''}`)],
+    ['event coordinates/depth', waveforms.map((waveform) => `${waveform.metadata.eventLat ?? ''}|${waveform.metadata.eventLon ?? ''}|${waveform.metadata.depthKm ?? ''}`)],
+    ['origin time', waveforms.map((waveform) => waveform.metadata.originTime?.trim() ?? '')],
+    ['sampling rate', waveforms.map((waveform) => Number(waveform.samplingHz.toPrecision(10)).toString())],
+    ['preprocessing', waveforms.map((waveform) => JSON.stringify(waveform.preprocessing ?? null))],
+  ];
+  const consistentFields = fields.filter(([, values]) => new Set(values).size <= 1).map(([label]) => label);
+  const inconsistentFields = fields.filter(([, values]) => new Set(values).size > 1).map(([label]) => label);
+  const completeThreeComponentSet = ['NS', 'EW', 'UD'].every((component) => components.includes(component as DerivedWaveform['component']));
+  return {
+    completeThreeComponentSet,
+    observedComponents: components,
+    consistentFields,
+    inconsistentFields,
+    status: inconsistentFields.length === 0 ? 'consistent' : 'review-required',
+  };
+}
+
 function scaleLinear(value: number, domainMin: number, domainMax: number, rangeMin: number, rangeMax: number): number {
   if (domainMax === domainMin) return (rangeMin + rangeMax) / 2;
   return rangeMin + ((value - domainMin) / (domainMax - domainMin)) * (rangeMax - rangeMin);
@@ -217,7 +334,7 @@ function timePath(
 ): string {
   if (maxAbs <= 0) return '';
   const parts: string[] = [];
-  downsampleSegments(time, values, 900).forEach((segment) => {
+  downsampleSegments(time, values, 1200).forEach((segment) => {
     segment.x.forEach((timeValue, index) => {
       const x = scaleLinear(timeValue, timeDomain[0], timeDomain[1], rect.x, rect.x + rect.width);
       const y = scaleLinear(segment.y[index], -maxAbs, maxAbs, rect.y + rect.height, rect.y);
@@ -227,10 +344,17 @@ function timePath(
   return parts.join(' ');
 }
 
-function linearTicks(min: number, max: number, count: number): number[] {
+function linearTicks(min: number, max: number, targetCount: number): number[] {
   if (!Number.isFinite(min) || !Number.isFinite(max) || max <= min) return [];
-  const n = Math.max(2, count);
-  return Array.from({ length: n }, (_, index) => min + ((max - min) * index) / (n - 1));
+  const rawStep = (max - min) / Math.max(1, targetCount - 1);
+  const power = 10 ** Math.floor(Math.log10(rawStep));
+  const normalized = rawStep / power;
+  const multiplier = normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10;
+  const step = multiplier * power;
+  const start = Math.ceil(min / step) * step;
+  const ticks: number[] = [];
+  for (let value = start; value <= max + step * 1e-9; value += step) ticks.push(Number(value.toPrecision(12)));
+  return ticks;
 }
 
 function logTicks(min: number, max: number): number[] {
@@ -247,18 +371,11 @@ function logTicks(min: number, max: number): number[] {
   return ticks;
 }
 
-function logMinorValues(min: number, max: number): number[] {
+function decadeTicks(min: number, max: number): number[] {
   if (min <= 0 || max <= min) return [];
-  const values: number[] = [];
-  const start = Math.floor(Math.log10(min));
-  const end = Math.ceil(Math.log10(max));
-  for (let exp = start; exp <= end; exp += 1) {
-    for (let multiplier = 1; multiplier < 10; multiplier += 1) {
-      const value = multiplier * 10 ** exp;
-      if (value >= min * 0.999 && value <= max * 1.001) values.push(value);
-    }
-  }
-  return values;
+  const ticks: number[] = [];
+  for (let exp = Math.ceil(Math.log10(min)); exp <= Math.floor(Math.log10(max)); exp += 1) ticks.push(10 ** exp);
+  return ticks;
 }
 
 function formatTick(value: number): string {
@@ -272,10 +389,6 @@ function formatTick(value: number): string {
   return Number(value.toFixed(0)).toString();
 }
 
-function powerLabel(exponent: number): string {
-  return `10^${exponent}`;
-}
-
 function niceLogFloor(value: number, fallback: number): number {
   if (!isFiniteNumber(value) || value <= 0) return fallback;
   return 10 ** Math.floor(Math.log10(value));
@@ -286,27 +399,8 @@ function niceLogCeil(value: number, fallback: number): number {
   return 10 ** Math.ceil(Math.log10(value));
 }
 
-function responseSeries(waveforms: readonly DerivedWaveform[], settings: ResponseSpectrumSettings): SeriesSpec[] {
-  return computeResponseSpectra([...waveforms], settings)
-    .sort((a, b) => componentRank(a.component) - componentRank(b.component))
-    .map((result) => {
-      const style = componentSeriesStyle(result.component);
-      return {
-        name: result.componentLabel,
-        x: result.points.map((point) => point.period),
-        y: result.points.map((point) => point.psv),
-        color: style.color,
-        dashArray: style.dashArray,
-      };
-    });
-}
-
-function log10(value: number): number {
-  return Math.log(value) / Math.LN10;
-}
-
 function toLogRange(domain: [number, number]): LogRange {
-  return { minLog: log10(domain[0]), maxLog: log10(domain[1]) };
+  return { minLog: Math.log10(domain[0]), maxLog: Math.log10(domain[1]) };
 }
 
 function fromLogRange(range: LogRange): [number, number] {
@@ -324,80 +418,100 @@ function expandLogRange(range: LogRange, targetSpan: number): LogRange {
   const span = range.maxLog - range.minLog;
   if (span >= targetSpan) return range;
   const missing = targetSpan - span;
-  return {
-    minLog: range.minLog - missing / 2,
-    maxLog: range.maxLog + missing / 2,
-  };
+  return { minLog: range.minLog - missing / 2, maxLog: range.maxLog + missing / 2 };
+}
+
+function responseSeries(
+  results: readonly ResponseSpectrumResult[],
+  ordinate: 'psv' | 'psa',
+): SeriesSpec[] {
+  return [...results]
+    .sort((a, b) => componentRank(a.component) - componentRank(b.component))
+    .map((result, index) => {
+      const style = componentSeriesStyle(result.component, index);
+      return {
+        name: result.componentLabel,
+        x: result.points.map((point) => point.period),
+        y: result.points.map((point) => point[ordinate]),
+        color: style.color,
+        dashArray: style.dashArray,
+      };
+    });
 }
 
 function responseSeriesRange(series: readonly SeriesSpec[]): { min: number; max: number } | undefined {
-  let min = Infinity;
-  let max = 0;
-  for (const entry of series) {
-    for (const value of entry.y) {
-      if (!Number.isFinite(value) || value <= 0) continue;
-      if (value < min) min = value;
-      if (value > max) max = value;
-    }
-  }
-  return max > 0 && Number.isFinite(min) ? { min, max } : undefined;
+  const finite = series.flatMap((entry) => entry.y.filter((value) => Number.isFinite(value) && value > 0));
+  if (finite.length === 0) return undefined;
+  return { min: Math.min(...finite), max: Math.max(...finite) };
 }
 
 function tripartiteDomains(series: readonly SeriesSpec[], settings: ResponseSpectrumSettings): { xDomain: [number, number]; yDomain: [number, number] } {
-  const xDomain: [number, number] = [
-    niceLogFloor(Math.min(settings.minPeriod, 0.01), 0.01),
-    niceLogCeil(Math.max(settings.maxPeriod, 10), 10),
-  ];
+  const finitePeriods = series.flatMap((entry) => entry.x.filter((value, index) => value > 0 && Number.isFinite(entry.y[index]) && entry.y[index] > 0));
+  const xDomain: [number, number] = finitePeriods.length > 1
+    ? [niceLogFloor(Math.min(...finitePeriods), settings.minPeriod), niceLogCeil(Math.max(...finitePeriods), settings.maxPeriod)]
+    : [settings.minPeriod, settings.maxPeriod];
   const range = responseSeriesRange(series);
   const yRange = range
-    ? snapLogRange({
-      minLog: log10(range.min) - 0.08,
-      maxLog: log10(range.max) + 0.08,
-    })
+    ? snapLogRange({ minLog: Math.log10(range.min) - 0.08, maxLog: Math.log10(range.max) + 0.08 })
     : { minLog: -2, maxLog: 1 };
   const xRange = toLogRange(xDomain);
   const targetSpan = Math.max(xRange.maxLog - xRange.minLog, yRange.maxLog - yRange.minLog);
-
   return {
     xDomain: fromLogRange(expandLogRange(xRange, targetSpan)),
     yDomain: fromLogRange(expandLogRange(yRange, targetSpan)),
   };
 }
 
-function linePath(series: SeriesSpec, rect: Rect, xDomain: [number, number], yDomain: [number, number]): string {
+function seriesPath(
+  series: SeriesSpec,
+  rect: Rect,
+  xDomain: [number, number],
+  yDomain: [number, number],
+  yScale: 'linear' | 'log',
+): string {
+  let firstInside = series.x.findIndex((value) => Number.isFinite(value) && value >= xDomain[0]);
+  if (firstInside < 0) return '';
+  let lastInside = series.x.length - 1;
+  while (lastInside >= 0 && (!Number.isFinite(series.x[lastInside]) || series.x[lastInside] > xDomain[1])) lastInside -= 1;
+  if (lastInside < firstInside) return '';
+  // Keep one neighbour outside each boundary so the clipped path reaches the
+  // exact plotting edge before display downsampling.
+  const sliceStart = Math.max(0, firstInside - 1);
+  const sliceEnd = Math.min(series.x.length, lastInside + 2);
   const parts: string[] = [];
-  downsampleSegments(series.x, series.y, 700, (x, y) => Number.isFinite(x) && Number.isFinite(y) && x > 0 && y > 0)
-    .forEach((segment) => {
-      segment.x.forEach((xValue, index) => {
-        const x = scaleLog(xValue, xDomain[0], xDomain[1], rect.x, rect.x + rect.width);
-        const y = scaleLog(segment.y[index], yDomain[0], yDomain[1], rect.y + rect.height, rect.y);
-        parts.push(`${index === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`);
-      });
+  downsampleSegments(series.x.slice(sliceStart, sliceEnd), series.y.slice(sliceStart, sliceEnd), 900, (x, y) => (
+    Number.isFinite(x) && Number.isFinite(y) && x > 0 && (yScale === 'log' ? y > 0 : y >= 0)
+  )).forEach((segment) => {
+    let segmentStarted = false;
+    segment.x.forEach((xValue, index) => {
+      const x = scaleLog(xValue, xDomain[0], xDomain[1], rect.x, rect.x + rect.width);
+      const y = yScale === 'log'
+        ? scaleLog(segment.y[index], yDomain[0], yDomain[1], rect.y + rect.height, rect.y)
+        : scaleLinear(segment.y[index], yDomain[0], yDomain[1], rect.y + rect.height, rect.y);
+      parts.push(`${segmentStarted ? 'L' : 'M'}${x.toFixed(1)},${y.toFixed(1)}`);
+      segmentStarted = true;
     });
+  });
   return parts.join(' ');
-}
-
-function fmt(value: number | undefined, digits = 4, suffix = ''): string {
-  return isFiniteNumber(value) ? `${formatNumber(value, digits)}${suffix}` : '-';
 }
 
 function card(rect: Rect, title: string, children: JSX.Element): JSX.Element {
   return (
     <g>
-      <text x={rect.x} y={rect.y + 18} fontSize="15" fontWeight="700" fill="#111827">{title}</text>
-      <line x1={rect.x} y1={rect.y + 30} x2={rect.x + rect.width} y2={rect.y + 30} stroke="#111827" strokeWidth="0.75" />
+      <text x={rect.x} y={rect.y + SECTION_FONT} fontSize={SECTION_FONT} fontWeight="700" fill="#17212b">{title}</text>
+      <line x1={rect.x} y1={rect.y + 34} x2={rect.x + rect.width} y2={rect.y + 34} stroke="#17212b" strokeWidth={AXIS_LINE} />
       {children}
     </g>
   );
 }
 
-function textRows(x: number, y: number, rows: Array<[string, string]>, rowHeight = 27): JSX.Element {
+function textRows(x: number, y: number, rows: Array<[string, string]>, rowHeight = 27, valueOffset = 132): JSX.Element {
   return (
     <g>
       {rows.map(([label, value], index) => (
-        <g key={label} transform={`translate(${x} ${y + index * rowHeight})`}>
-          <text x="0" y="0" fontSize="11.5" fontWeight="700" fill="#4b5563">{label}</text>
-          <text x="132" y="0" fontSize="12" fontWeight="600" fill="#111827">{value}</text>
+        <g key={`${label}-${index}`} transform={`translate(${x} ${y + index * rowHeight})`}>
+          <text x="0" y="0" fontSize={SUPPORT_FONT} fontWeight="700" fill="#52606d">{label}</text>
+          <text x={valueOffset} y="0" fontSize={BODY_FONT} fontWeight="600" fill="#17212b">{value}</text>
         </g>
       ))}
     </g>
@@ -407,9 +521,9 @@ function textRows(x: number, y: number, rows: Array<[string, string]>, rowHeight
 function renderWaveformPanel(rect: Rect, title: string, waveforms: readonly DerivedWaveform[], quantity: Quantity): JSX.Element {
   const ordered = [...waveforms].sort((a, b) => componentRank(a.component) - componentRank(b.component));
   const timeAxis = reportTimeAxis(ordered);
-  const plotTop = rect.y + 44;
-  const rowHeight = (rect.height - 102) / Math.max(1, ordered.length);
-  const plotWidth = rect.width - 120;
+  const plotTop = rect.y + 56;
+  const rowHeight = (rect.height - 116) / Math.max(1, ordered.length);
+  const plotWidth = rect.width - 82 - 215;
   let timeMin = Infinity;
   let timeMax = -Infinity;
   let sharedMaxAbs = 0;
@@ -429,262 +543,394 @@ function renderWaveformPanel(rect: Rect, title: string, waveforms: readonly Deri
   if (timeMin === timeMax) timeMax = timeMin + 1;
   sharedMaxAbs = Math.max(sharedMaxAbs, 1e-12);
   const timeDomain: [number, number] = [timeMin, timeMax];
-  const axisTicks = linearTicks(timeMin, timeMax, 5);
-  const axisX = rect.x + 76;
-  const axisY = rect.y + rect.height - 34;
+  const axisTicks = linearTicks(timeMin, timeMax, 6);
+  const axisX = rect.x + 82;
+  const axisY = rect.y + rect.height - 38;
 
   return card(rect, title, (
     <g>
       {ordered.length > 0 && (
-        <text x={rect.x + rect.width - 2} y={rect.y + 18} textAnchor="end" fontSize="11.5" fontWeight="600" fill="#4b5563">
-          Shared ordinate ±{formatNumber(sharedMaxAbs, 4)} {quantityUnit(quantity)}
+        <text x={rect.x + rect.width} y={rect.y + SECTION_FONT} textAnchor="end" fontSize={SUPPORT_FONT} fontWeight="600" fill="#52606d">
+          Shared ordinate ±{formatSignificant(sharedMaxAbs)} {quantityUnit(quantity)}
         </text>
       )}
       {ordered.length === 0 ? (
-        <text x={rect.x + rect.width / 2} y={rect.y + rect.height / 2} textAnchor="middle" fontSize="13" fontWeight="600" fill="#6b7280">No waveform data</text>
+        <text x={rect.x + rect.width / 2} y={rect.y + rect.height / 2} textAnchor="middle" fontSize={BODY_FONT} fontWeight="600" fill="#6b7280">No waveform data</text>
       ) : ordered.map((waveform, index) => {
         const rowRect: Rect = {
-          x: rect.x + 76,
-          y: plotTop + index * rowHeight + 8,
+          x: axisX,
+          y: plotTop + index * rowHeight + 7,
           width: plotWidth,
-          height: Math.max(28, rowHeight - 18),
+          height: Math.max(32, rowHeight - 16),
         };
         const values = quantityValues(waveform, quantity);
         const offset = timeAxis.offsetsByRecordId.get(waveform.sourceRecordId) ?? 0;
         const alignedTime = offset === 0 ? waveform.time : waveform.time.map((value) => value + offset);
         const peak = maxAbsWithTime(values, alignedTime);
-        const style = componentSeriesStyle(waveform.component);
+        const style = componentSeriesStyle(waveform.component, index);
         return (
           <g key={`${quantity}-${waveform.sourceRecordId}`}>
-            <text x={rect.x + 2} y={rowRect.y + rowRect.height / 2 + 5} fontSize="12.5" fontWeight="700" fill="#263640">{waveform.componentLabel}</text>
-            <line x1={rowRect.x} y1={rowRect.y + rowRect.height / 2} x2={rowRect.x + rowRect.width} y2={rowRect.y + rowRect.height / 2} stroke="#9ca3af" strokeWidth="0.55" />
+            <text x={rect.x + 2} y={rowRect.y + rowRect.height / 2 + BODY_FONT * 0.35} fontSize={BODY_FONT} fontWeight="700" fill="#263640">{waveform.componentLabel}</text>
+            {axisTicks.slice(1, -1).map((tick) => {
+              const x = scaleLinear(tick, timeMin, timeMax, rowRect.x, rowRect.x + rowRect.width);
+              return <line key={`${waveform.sourceRecordId}-grid-${tick}`} x1={x} y1={rowRect.y} x2={x} y2={rowRect.y + rowRect.height} stroke="#d9dee3" strokeWidth={MIN_LINE} />;
+            })}
+            <line x1={rowRect.x} y1={rowRect.y + rowRect.height / 2} x2={rowRect.x + rowRect.width} y2={rowRect.y + rowRect.height / 2} stroke="#8b959e" strokeWidth={MIN_LINE} />
+            <line x1={rowRect.x} y1={rowRect.y} x2={rowRect.x} y2={rowRect.y + rowRect.height} stroke="#263640" strokeWidth={AXIS_LINE} />
             <path
               d={timePath(alignedTime, values, rowRect, sharedMaxAbs, timeDomain)}
               fill="none"
               stroke={style.color}
-              strokeWidth="1.2"
+              strokeWidth={DATA_LINE}
               strokeDasharray={style.dashArray}
               strokeLinecap="round"
               strokeLinejoin="round"
             />
-            <text x={rowRect.x + rowRect.width - 7} y={rowRect.y + 14} textAnchor="end" fontSize="11.5" fontWeight="600" fill="#374151">
-              Max {formatNumber(peak.value, 4)} {quantityUnit(quantity)} at {formatNumber(peak.time, 3)} s
+            <text x={rowRect.x + rowRect.width + 14} y={rowRect.y + rowRect.height / 2 - 2} fontSize={SUPPORT_FONT} fontWeight="700" fill="#374151">
+              Peak {formatSignificant(peak.value)} {quantityUnit(quantity)}
+            </text>
+            <text x={rowRect.x + rowRect.width + 14} y={rowRect.y + rowRect.height / 2 + SUPPORT_FONT + 4} fontSize={SUPPORT_FONT} fill="#52606d">
+              t = {formatNumber(peak.time, sampleTimeDigits(waveform.dt))} s
             </text>
           </g>
         );
       })}
       {axisTicks.length > 0 && (
         <g>
-          <line x1={axisX} y1={axisY} x2={axisX + plotWidth} y2={axisY} stroke="#374151" strokeWidth="0.65" />
+          <line x1={axisX} y1={axisY} x2={axisX + plotWidth} y2={axisY} stroke="#263640" strokeWidth={AXIS_LINE} />
           {axisTicks.map((tick) => {
             const x = scaleLinear(tick, timeMin, timeMax, axisX, axisX + plotWidth);
             return (
               <g key={`${title}-tick-${tick}`}>
-                <line x1={x} y1={axisY} x2={x} y2={axisY + 4} stroke="#374151" strokeWidth="0.65" />
-                <text x={x} y={axisY + 15} textAnchor="middle" fontSize="11.5" fontWeight="600" fill="#374151">{formatTick(tick)}</text>
+                <line x1={x} y1={axisY} x2={x} y2={axisY + 6} stroke="#263640" strokeWidth={AXIS_LINE} />
+                <text x={x} y={axisY + 22} textAnchor="middle" fontSize={AXIS_FONT} fill="#374151">{formatTick(tick)}</text>
               </g>
             );
           })}
         </g>
       )}
-      <text x={rect.x + rect.width / 2} y={rect.y + rect.height - 2} textAnchor="middle" fontSize="11.5" fontWeight="700" fill="#374151">{timeAxis.label}</text>
+      <text x={axisX + plotWidth / 2} y={rect.y + rect.height - 3} textAnchor="middle" fontSize={AXIS_FONT} fontWeight="700" fill="#374151">{timeAxis.label}</text>
     </g>
   ));
 }
 
-function renderResponsePanel(rect: Rect, series: readonly SeriesSpec[], settings: ResponseSpectrumSettings): JSX.Element {
-  const leftAxis = 78;
-  const rightPad = 30;
-  const plotSize = Math.min(rect.width - leftAxis - rightPad, rect.height - 98);
-  const plot: Rect = {
-    x: rect.x + leftAxis + (rect.width - leftAxis - rightPad - plotSize) / 2,
-    y: rect.y + 48,
-    width: plotSize,
-    height: plotSize,
-  };
-  const { xDomain, yDomain } = tripartiteDomains(series, settings);
+function renderSpectrumPanel(
+  rect: Rect,
+  title: string,
+  subtitle: string,
+  series: readonly SeriesSpec[],
+  xDomain: [number, number],
+  yDomain: [number, number],
+  xLabel: string,
+  yLabel: string,
+  yScale: 'linear' | 'log',
+  clipId: string,
+): JSX.Element {
+  const plot: Rect = { x: rect.x + 82, y: rect.y + 96, width: rect.width - 108, height: rect.height - 170 };
   const xTicks = logTicks(xDomain[0], xDomain[1]);
-  const yTicks = logTicks(yDomain[0], yDomain[1]);
-  const tripartiteScaleValues = logMinorValues(yDomain[0] / 1000, yDomain[1] * 1000);
-  const tripartitePeriodValues = logMinorValues(xDomain[0], xDomain[1]);
-  const accelerationLabelExponents = Array.from(
-    { length: Math.max(0, Math.ceil(Math.log10(yDomain[1])) + 2 - Math.floor(Math.log10(yDomain[0])) + 1) },
-    (_, i) => Math.floor(Math.log10(yDomain[0])) + i,
-  );
-  const displacementLabelExponents = Array.from(
-    { length: Math.max(0, Math.ceil(Math.log10(yDomain[1])) - 1 - (Math.floor(Math.log10(yDomain[0])) - 2) + 1) },
-    (_, i) => Math.floor(Math.log10(yDomain[0])) - 2 + i,
-  );
-  const clipId = 'report-tripartite-clip';
-
-  const guidePath = (points: Array<[number, number]>): string => points
-    .filter(([xValue, yValue]) => Number.isFinite(xValue) && Number.isFinite(yValue) && xValue > 0 && yValue > 0)
-    .map(([xValue, yValue], index) => {
-      const x = scaleLog(xValue, xDomain[0], xDomain[1], plot.x, plot.x + plot.width);
-      const y = scaleLog(yValue, yDomain[0], yDomain[1], plot.y + plot.height, plot.y);
-      return `${index === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`;
-    })
-    .join(' ');
-  const insideDomain = (xValue: number, yValue: number): boolean => (
-    xValue >= xDomain[0]
-    && xValue <= xDomain[1]
-    && yValue >= yDomain[0]
-    && yValue <= yDomain[1]
-  );
-
-  return card(rect, '(c) Tripartite response spectrum: pSv', (
+  const xMajorTicks = decadeTicks(xDomain[0], xDomain[1]);
+  const yTicks = yScale === 'log' ? decadeTicks(yDomain[0], yDomain[1]) : linearTicks(yDomain[0], yDomain[1], 5);
+  return card(rect, title, (
     <g>
-      <defs>
-        <clipPath id={clipId}>
-          <rect x={plot.x} y={plot.y} width={plot.width} height={plot.height} />
-        </clipPath>
-      </defs>
-      <text x={rect.x + rect.width - 2} y={rect.y + 18} textAnchor="end" fontSize="11.5" fontWeight="700" fill="#374151">Damping h = {(settings.dampingRatio * 100).toFixed(1)}%</text>
-      <rect x={plot.x} y={plot.y} width={plot.width} height={plot.height} fill="#ffffff" stroke="#111827" strokeWidth="1" />
+      <defs><clipPath id={clipId}><rect x={plot.x} y={plot.y} width={plot.width} height={plot.height} /></clipPath></defs>
+      <text x={rect.x + rect.width} y={rect.y + SECTION_FONT} textAnchor="end" fontSize={SUPPORT_FONT} fontWeight="600" fill="#52606d">{subtitle}</text>
+      <g transform={`translate(${plot.x} ${rect.y + 63})`}>
+        {series.map((entry, index) => (
+          <g key={`${clipId}-legend-${entry.name}`} transform={`translate(${index * 112} 0)`}>
+            <line x1="0" y1="0" x2="28" y2="0" stroke={entry.color} strokeWidth={DATA_LINE} strokeDasharray={entry.dashArray} />
+            <text x="35" y={SUPPORT_FONT * 0.32} fontSize={SUPPORT_FONT} fontWeight="700" fill="#17212b">{entry.name}</text>
+          </g>
+        ))}
+      </g>
+      <rect x={plot.x} y={plot.y} width={plot.width} height={plot.height} fill="#ffffff" stroke="#263640" strokeWidth={AXIS_LINE} />
+      {xMajorTicks.map((tick) => {
+        const x = scaleLog(tick, xDomain[0], xDomain[1], plot.x, plot.x + plot.width);
+        return <line key={`${clipId}-xgrid-${tick}`} x1={x} y1={plot.y} x2={x} y2={plot.y + plot.height} stroke="#d4dae0" strokeWidth={MIN_LINE} />;
+      })}
+      {yTicks.map((tick) => {
+        const y = yScale === 'log'
+          ? scaleLog(tick, yDomain[0], yDomain[1], plot.y + plot.height, plot.y)
+          : scaleLinear(tick, yDomain[0], yDomain[1], plot.y + plot.height, plot.y);
+        return (
+          <g key={`${clipId}-y-${tick}`}>
+            {tick !== yDomain[0] && <line x1={plot.x} y1={y} x2={plot.x + plot.width} y2={y} stroke="#d4dae0" strokeWidth={MIN_LINE} />}
+            <line x1={plot.x - 6} y1={y} x2={plot.x} y2={y} stroke="#263640" strokeWidth={AXIS_LINE} />
+            <text x={plot.x - 11} y={y + AXIS_FONT * 0.34} textAnchor="end" fontSize={AXIS_FONT} fill="#374151">{formatTick(tick)}</text>
+          </g>
+        );
+      })}
       {xTicks.map((tick) => {
         const x = scaleLog(tick, xDomain[0], xDomain[1], plot.x, plot.x + plot.width);
         return (
-          <g key={`x-${tick}`}>
-            <text x={x} y={plot.y + plot.height + 17} textAnchor="middle" fontSize="11.5" fontWeight="600" fill="#374151">{formatTick(tick)}</text>
+          <g key={`${clipId}-x-${tick}`}>
+            <line x1={x} y1={plot.y + plot.height} x2={x} y2={plot.y + plot.height + 6} stroke="#263640" strokeWidth={AXIS_LINE} />
+            <text x={x} y={plot.y + plot.height + 23} textAnchor="middle" fontSize={AXIS_FONT} fill="#374151">{formatTick(tick)}</text>
+          </g>
+        );
+      })}
+      <g clipPath={`url(#${clipId})`}>
+        {series.map((entry) => (
+          <path key={`${clipId}-${entry.name}`} d={seriesPath(entry, plot, xDomain, yDomain, yScale)} fill="none" stroke={entry.color} strokeWidth={DATA_LINE} strokeDasharray={entry.dashArray} strokeLinecap="round" strokeLinejoin="round" />
+        ))}
+      </g>
+      <text x={plot.x + plot.width / 2} y={rect.y + rect.height - 8} textAnchor="middle" fontSize={AXIS_FONT} fontWeight="700" fill="#263640">{xLabel}</text>
+      <text x={rect.x + 18} y={plot.y + plot.height / 2} textAnchor="middle" fontSize={AXIS_FONT} fontWeight="700" fill="#263640" transform={`rotate(-90 ${rect.x + 18} ${plot.y + plot.height / 2})`}>{yLabel}</text>
+    </g>
+  ));
+}
+
+function starPoints(cx: number, cy: number, outerRadius: number, innerRadius: number): string {
+  return Array.from({ length: 10 }, (_, index) => {
+    const angle = -Math.PI / 2 + index * Math.PI / 5;
+    const radius = index % 2 === 0 ? outerRadius : innerRadius;
+    return `${(cx + Math.cos(angle) * radius).toFixed(1)},${(cy + Math.sin(angle) * radius).toFixed(1)}`;
+  }).join(' ');
+}
+
+function niceScaleDistance(maximumKm: number): number {
+  if (!Number.isFinite(maximumKm) || maximumKm <= 0) return 1;
+  const power = 10 ** Math.floor(Math.log10(maximumKm));
+  const normalized = maximumKm / power;
+  const factor = normalized >= 5 ? 5 : normalized >= 2 ? 2 : 1;
+  return factor * power;
+}
+
+function renderLocator(rect: Rect, row: StationDistanceRow | undefined): JSX.Element {
+  const hasCoordinates = isFiniteNumber(row?.eventLat) && isFiniteNumber(row?.eventLon)
+    && isFiniteNumber(row?.stationLat) && isFiniteNumber(row?.stationLon);
+  const map: Rect = { x: rect.x + 8, y: rect.y + 47, width: rect.width - 16, height: rect.height - 62 };
+  if (!hasCoordinates) {
+    return card(rect, 'Source–station locator', (
+      <g>
+        <rect x={map.x} y={map.y} width={map.width} height={map.height} fill="#f5f7f8" stroke="#aab3bb" strokeWidth={MIN_LINE} />
+        <text x={map.x + map.width / 2} y={map.y + map.height / 2} textAnchor="middle" fontSize={BODY_FONT} fill="#52606d">Coordinates unavailable</text>
+      </g>
+    ));
+  }
+  const eventLat = row.eventLat as number;
+  const eventLon = row.eventLon as number;
+  const stationLat = row.stationLat as number;
+  const stationLon = row.stationLon as number;
+  const meanLatRadians = ((eventLat + stationLat) / 2) * Math.PI / 180;
+  const kilometresPerDegreeLat = 111.32;
+  const kilometresPerDegreeLon = 111.32 * Math.max(0.05, Math.cos(meanLatRadians));
+  const deltaXKm = (stationLon - eventLon) * kilometresPerDegreeLon;
+  const deltaYKm = (stationLat - eventLat) * kilometresPerDegreeLat;
+  const separationKm = Math.hypot(deltaXKm, deltaYKm);
+  const paddingKm = Math.max(3, separationKm * 0.22);
+  const usableWidth = map.width - 54;
+  const usableHeight = map.height - 42;
+  const scalePxPerKm = Math.min(
+    usableWidth / Math.max(2 * paddingKm, Math.abs(deltaXKm) + 2 * paddingKm),
+    usableHeight / Math.max(2 * paddingKm, Math.abs(deltaYKm) + 2 * paddingKm),
+  );
+  const centreX = map.x + map.width / 2;
+  const centreY = map.y + map.height / 2;
+  const eventX = centreX - deltaXKm * scalePxPerKm / 2;
+  const eventY = centreY + deltaYKm * scalePxPerKm / 2;
+  const stationX = centreX + deltaXKm * scalePxPerKm / 2;
+  const stationY = centreY - deltaYKm * scalePxPerKm / 2;
+  const scaleBarKm = niceScaleDistance((map.width * 0.24) / scalePxPerKm);
+  const scaleBarPx = scaleBarKm * scalePxPerKm;
+  return card(rect, 'Source–station locator', (
+    <g>
+      <rect x={map.x} y={map.y} width={map.width} height={map.height} rx="4" fill="#f7f9fa" stroke="#8e99a3" strokeWidth={AXIS_LINE} />
+      {[0.25, 0.5, 0.75].map((ratio) => (
+        <g key={`locator-grid-${ratio}`}>
+          <line x1={map.x + map.width * ratio} y1={map.y} x2={map.x + map.width * ratio} y2={map.y + map.height} stroke="#d7dde2" strokeWidth={MIN_LINE} />
+          <line x1={map.x} y1={map.y + map.height * ratio} x2={map.x + map.width} y2={map.y + map.height * ratio} stroke="#d7dde2" strokeWidth={MIN_LINE} />
+        </g>
+      ))}
+      <line x1={eventX} y1={eventY} x2={stationX} y2={stationY} stroke="#61707c" strokeWidth={AXIS_LINE} strokeDasharray="5 4" />
+      <polygon points={starPoints(eventX, eventY, 10, 4.5)} fill="#b42318" stroke="#7a271a" strokeWidth={MIN_LINE} />
+      <polygon points={`${stationX},${stationY - 8} ${stationX - 7},${stationY + 6} ${stationX + 7},${stationY + 6}`} fill="#166a8f" stroke="#0d4660" strokeWidth={MIN_LINE} />
+      <text x={eventX + 12} y={eventY - 7} fontSize={SUPPORT_FONT} fontWeight="700" fill="#7a271a">Source</text>
+      <text x={stationX + 11} y={stationY + 15} fontSize={SUPPORT_FONT} fontWeight="700" fill="#0d4660">Station</text>
+      <text x={map.x + 7} y={map.y + SUPPORT_FONT + 3} fontSize={SUPPORT_FONT} fill="#52606d">Local km grid · equal scale</text>
+      <line x1={map.x + 10} y1={map.y + map.height - 13} x2={map.x + 10 + scaleBarPx} y2={map.y + map.height - 13} stroke="#263640" strokeWidth={AXIS_LINE} />
+      <line x1={map.x + 10} y1={map.y + map.height - 17} x2={map.x + 10} y2={map.y + map.height - 9} stroke="#263640" strokeWidth={AXIS_LINE} />
+      <line x1={map.x + 10 + scaleBarPx} y1={map.y + map.height - 17} x2={map.x + 10 + scaleBarPx} y2={map.y + map.height - 9} stroke="#263640" strokeWidth={AXIS_LINE} />
+      <text x={map.x + 10 + scaleBarPx / 2} y={map.y + map.height - 20} textAnchor="middle" fontSize={SUPPORT_FONT} fill="#263640">{formatSignificant(scaleBarKm)} km</text>
+      <text x={map.x + map.width - 11} y={map.y + SUPPORT_FONT + 3} textAnchor="end" fontSize={SUPPORT_FONT} fontWeight="700" fill="#52606d">N ↑</text>
+    </g>
+  ));
+}
+
+function renderMetricStrip(
+  rect: Rect,
+  intensity: ReturnType<typeof computeJmaIntensity>,
+  pga: ReturnType<typeof metricPeak>,
+  pgv: ReturnType<typeof metricPeak>,
+  pgd: ReturnType<typeof metricPeak>,
+  duration: number | undefined,
+): JSX.Element {
+  const metrics: Array<{ label: string; value: string; detail: string }> = [
+    { label: 'JMA instrumental intensity', value: intensity.available ? formatNumber(intensity.intensity, 1) : '–', detail: intensity.available ? intensity.classLabel : 'original acceleration unavailable' },
+    { label: 'PGA', value: pga ? `${formatSignificant(pga.value)} cm/s²` : '–', detail: pga?.component ?? '' },
+    { label: 'PGV', value: pgv ? `${formatSignificant(pgv.value)} cm/s` : '–', detail: pgv?.component ?? '' },
+    { label: 'PGD', value: pgd ? `${formatSignificant(pgd.value)} cm` : '–', detail: pgd?.component ?? '' },
+    { label: 'Displayed duration', value: isFiniteNumber(duration) ? `${formatSignificant(duration)} s` : '–', detail: 'longest component' },
+  ];
+  const columnWidth = rect.width / metrics.length;
+  return (
+    <g>
+      <rect x={rect.x} y={rect.y} width={rect.width} height={rect.height} rx="5" fill="#f4f7f8" stroke="#9aa5ae" strokeWidth={AXIS_LINE} />
+      {metrics.map((metric, index) => {
+        const x = rect.x + index * columnWidth;
+        return (
+          <g key={metric.label}>
+            {index > 0 && <line x1={x} y1={rect.y + 13} x2={x} y2={rect.y + rect.height - 13} stroke="#c9d0d5" strokeWidth={MIN_LINE} />}
+            <text x={x + columnWidth / 2} y={rect.y + 25} textAnchor="middle" fontSize={SUPPORT_FONT} fontWeight="700" fill="#52606d">{metric.label}</text>
+            <text x={x + columnWidth / 2} y={rect.y + 57} textAnchor="middle" fontSize={SECTION_FONT} fontWeight="700" fill="#17212b">{metric.value}</text>
+            <text x={x + columnWidth / 2} y={rect.y + 82} textAnchor="middle" fontSize={SUPPORT_FONT} fill="#52606d">{metric.detail}</text>
+          </g>
+        );
+      })}
+    </g>
+  );
+}
+
+function renderTripartitePanel(rect: Rect, series: readonly SeriesSpec[], settings: ResponseSpectrumSettings): JSX.Element {
+  const plotSize = Math.min(rect.width - 150, rect.height - 150);
+  const plot: Rect = { x: rect.x + 104, y: rect.y + 84, width: plotSize, height: plotSize };
+  const { xDomain, yDomain } = tripartiteDomains(series, settings);
+  const xTicks = logTicks(xDomain[0], xDomain[1]);
+  const yTicks = logTicks(yDomain[0], yDomain[1]);
+  const majorPeriods = decadeTicks(xDomain[0], xDomain[1]);
+  const psvGuides = decadeTicks(yDomain[0], yDomain[1]);
+  const diagonalValues = decadeTicks(yDomain[0] / 100, yDomain[1] * 100);
+  const clipId = 'report-tripartite-clip';
+  const guidePath = (points: Array<[number, number]>): string => points.map(([xValue, yValue], index) => {
+    const x = scaleLog(xValue, xDomain[0], xDomain[1], plot.x, plot.x + plot.width);
+    const y = scaleLog(yValue, yDomain[0], yDomain[1], plot.y + plot.height, plot.y);
+    return `${index === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(' ');
+
+  return card(rect, '(b) Tripartite response spectrum: pSv', (
+    <g>
+      <defs><clipPath id={clipId}><rect x={plot.x} y={plot.y} width={plot.width} height={plot.height} /></clipPath></defs>
+      <text x={rect.x + rect.width} y={rect.y + SECTION_FONT} textAnchor="end" fontSize={SUPPORT_FONT} fontWeight="700" fill="#52606d">h = {(settings.dampingRatio * 100).toFixed(1)}% · major-decade guides</text>
+      <g transform={`translate(${plot.x} ${rect.y + 56})`}>
+        {series.map((entry, index) => (
+          <g key={`trip-legend-${entry.name}`} transform={`translate(${index * 130} 0)`}>
+            <line x1="0" y1="0" x2="30" y2="0" stroke={entry.color} strokeWidth={DATA_LINE} strokeDasharray={entry.dashArray} />
+            <text x="38" y={SUPPORT_FONT * 0.32} fontSize={SUPPORT_FONT} fontWeight="700" fill="#17212b">{entry.name}</text>
+          </g>
+        ))}
+      </g>
+      <rect x={plot.x} y={plot.y} width={plot.width} height={plot.height} fill="#ffffff" stroke="#263640" strokeWidth={AXIS_LINE} />
+      <g clipPath={`url(#${clipId})`}>
+        {majorPeriods.map((period) => {
+          const x = scaleLog(period, xDomain[0], xDomain[1], plot.x, plot.x + plot.width);
+          return <line key={`trip-period-${period}`} x1={x} y1={plot.y} x2={x} y2={plot.y + plot.height} stroke="#d0d6db" strokeWidth={MIN_LINE} />;
+        })}
+        {psvGuides.map((value) => {
+          const y = scaleLog(value, yDomain[0], yDomain[1], plot.y + plot.height, plot.y);
+          return <line key={`trip-psv-${value}`} x1={plot.x} y1={y} x2={plot.x + plot.width} y2={y} stroke="#d0d6db" strokeWidth={MIN_LINE} />;
+        })}
+        {diagonalValues.map((value) => (
+          <g key={`trip-diagonal-${value}`}>
+            <path d={guidePath([[xDomain[0], (value * xDomain[0]) / (2 * Math.PI)], [xDomain[1], (value * xDomain[1]) / (2 * Math.PI)]])} fill="none" stroke="#e0e4e7" strokeWidth={MIN_LINE} strokeDasharray="5 5" />
+            <path d={guidePath([[xDomain[0], (value * 2 * Math.PI) / xDomain[0]], [xDomain[1], (value * 2 * Math.PI) / xDomain[1]]])} fill="none" stroke="#e0e4e7" strokeWidth={MIN_LINE} strokeDasharray="5 5" />
+          </g>
+        ))}
+        {series.map((entry) => (
+          <path key={`trip-series-${entry.name}`} d={seriesPath(entry, plot, xDomain, yDomain, 'log')} fill="none" stroke={entry.color} strokeWidth={DATA_LINE * 1.18} strokeDasharray={entry.dashArray} strokeLinecap="round" strokeLinejoin="round" />
+        ))}
+      </g>
+      {xTicks.map((tick) => {
+        const x = scaleLog(tick, xDomain[0], xDomain[1], plot.x, plot.x + plot.width);
+        return (
+          <g key={`trip-x-${tick}`}>
+            <line x1={x} y1={plot.y + plot.height} x2={x} y2={plot.y + plot.height + 7} stroke="#263640" strokeWidth={AXIS_LINE} />
+            <text x={x} y={plot.y + plot.height + 25} textAnchor="middle" fontSize={AXIS_FONT} fill="#374151">{formatTick(tick)}</text>
           </g>
         );
       })}
       {yTicks.map((tick) => {
         const y = scaleLog(tick, yDomain[0], yDomain[1], plot.y + plot.height, plot.y);
         return (
-          <g key={`y-${tick}`}>
-            <text x={plot.x - 9} y={y + 4} textAnchor="end" fontSize="11.5" fontWeight="600" fill="#374151">{formatTick(tick)}</text>
+          <g key={`trip-y-${tick}`}>
+            <line x1={plot.x - 7} y1={y} x2={plot.x} y2={y} stroke="#263640" strokeWidth={AXIS_LINE} />
+            <text x={plot.x - 12} y={y + AXIS_FONT * 0.34} textAnchor="end" fontSize={AXIS_FONT} fill="#374151">{formatTick(tick)}</text>
           </g>
         );
       })}
-
-      <g clipPath={`url(#${clipId})`}>
-        {tripartiteScaleValues.map((value) => (
-          <g key={`trip-${value}`}>
-            <path
-              d={guidePath([
-                [xDomain[0], (value * xDomain[0]) / (2 * Math.PI)],
-                [xDomain[1], (value * xDomain[1]) / (2 * Math.PI)],
-              ])}
-              fill="none"
-              stroke="#98a2b3"
-              strokeWidth="0.7"
-              strokeDasharray="4 4"
-            />
-            <path
-              d={guidePath([
-                [xDomain[0], (value * 2 * Math.PI) / xDomain[0]],
-                [xDomain[1], (value * 2 * Math.PI) / xDomain[1]],
-              ])}
-              fill="none"
-              stroke="#98a2b3"
-              strokeWidth="0.7"
-              strokeDasharray="4 4"
-            />
-            <path
-              d={guidePath([
-                [xDomain[0], value],
-                [xDomain[1], value],
-              ])}
-              fill="none"
-              stroke="#98a2b3"
-              strokeWidth="0.7"
-              strokeDasharray="4 4"
-            />
-          </g>
-        ))}
-        {tripartitePeriodValues.map((period) => (
-          <line
-            key={`period-${period}`}
-            x1={scaleLog(period, xDomain[0], xDomain[1], plot.x, plot.x + plot.width)}
-            y1={plot.y}
-            x2={scaleLog(period, xDomain[0], xDomain[1], plot.x, plot.x + plot.width)}
-            y2={plot.y + plot.height}
-            stroke="#98a2b3"
-            strokeWidth="0.7"
-            strokeDasharray="4 4"
-          />
-        ))}
-        {series.map((entry) => (
-          <path key={entry.name} d={linePath(entry, plot, xDomain, yDomain)} fill="none" stroke={entry.color} strokeWidth="1.8" strokeDasharray={entry.dashArray} strokeLinecap="round" strokeLinejoin="round" />
-        ))}
-      </g>
-
-      {accelerationLabelExponents.map((exponent) => {
-        const acceleration = 10 ** exponent;
-        let xValue = xDomain[1];
-        let yValue = (acceleration * xValue) / (2 * Math.PI);
-        if (yValue > yDomain[1]) {
-          yValue = yDomain[1] / 1.08;
-          xValue = (2 * Math.PI * yValue) / acceleration;
-        }
-        if (!insideDomain(xValue, yValue)) return null;
-        const x = scaleLog(xValue, xDomain[0], xDomain[1], plot.x, plot.x + plot.width);
-        const y = scaleLog(yValue, yDomain[0], yDomain[1], plot.y + plot.height, plot.y);
-        return (
-          <text
-            key={`acc-label-${exponent}`}
-            x={x}
-            y={y}
-            textAnchor="middle"
-            fontSize="11.5"
-            fontWeight="600"
-            fill="#667085"
-            transform={`rotate(-38 ${x} ${y})`}
-          >
-            {exponent === accelerationLabelExponents[accelerationLabelExponents.length - 1]
-              ? `${powerLabel(exponent)} cm/s²`
-              : powerLabel(exponent)}
-          </text>
-        );
-      })}
-      {displacementLabelExponents.map((exponent) => {
-        const displacement = 10 ** exponent;
-        let xValue = xDomain[0];
-        let yValue = (displacement * 2 * Math.PI) / xValue;
-        if (yValue > yDomain[1]) {
-          yValue = yDomain[1] / 1.06;
-          xValue = (2 * Math.PI * displacement) / yValue;
-        }
-        if (!insideDomain(xValue, yValue)) return null;
-        const x = scaleLog(xValue, xDomain[0], xDomain[1], plot.x, plot.x + plot.width);
-        const y = scaleLog(yValue, yDomain[0], yDomain[1], plot.y + plot.height, plot.y);
-        return (
-          <text
-            key={`disp-label-${exponent}`}
-            x={x}
-            y={y}
-            textAnchor="middle"
-            fontSize="11.5"
-            fontWeight="600"
-            fill="#667085"
-            transform={`rotate(38 ${x} ${y})`}
-          >
-            {exponent === displacementLabelExponents[displacementLabelExponents.length - 1]
-              ? `${powerLabel(exponent)} cm`
-              : powerLabel(exponent)}
-          </text>
-        );
-      })}
-
-      <text x={plot.x + plot.width / 2} y={rect.y + rect.height - 17} textAnchor="middle" fontSize="12" fontWeight="700" fill="#111827">Period [s]</text>
-      <text x={rect.x + 28} y={plot.y + plot.height / 2} textAnchor="middle" fontSize="12" fontWeight="700" fill="#111827" transform={`rotate(-90 ${rect.x + 28} ${plot.y + plot.height / 2})`}>pSv [cm/s]</text>
-      <g transform={`translate(${plot.x + 16} ${rect.y + 36})`}>
-        {series.map((entry, index) => (
-          <g key={`legend-${entry.name}`} transform={`translate(${index * 120} 0)`}>
-            <line x1="0" y1="0" x2="24" y2="0" stroke={entry.color} strokeWidth="1.8" strokeDasharray={entry.dashArray} strokeLinecap="round" />
-            <text x="30" y="4" fontSize="11.5" fontWeight="700" fill="#111827">{entry.name}</text>
-          </g>
-        ))}
-      </g>
+      <text x={plot.x + plot.width / 2} y={plot.y + plot.height + 55} textAnchor="middle" fontSize={AXIS_FONT} fontWeight="700" fill="#263640">Period [s]</text>
+      <text x={rect.x + 28} y={plot.y + plot.height / 2} textAnchor="middle" fontSize={AXIS_FONT} fontWeight="700" fill="#263640" transform={`rotate(-90 ${rect.x + 28} ${plot.y + plot.height / 2})`}>pSv [cm/s]</text>
+      <text x={plot.x + plot.width - 4} y={plot.y + 20} textAnchor="end" fontSize={SUPPORT_FONT} fill="#6b7280">diagonal: constant Sa / Sd</text>
     </g>
   ));
 }
 
-export function ReportFigurePanel({ waveforms, jmaWaveforms, peaks, responseSettings }: ReportFigurePanelProps): JSX.Element {
+function reportFourierEntries(waveforms: readonly DerivedWaveform[]): ReportFourierEntry[] {
+  return [...waveforms].sort((a, b) => componentRank(a.component) - componentRank(b.component)).map((waveform, index) => {
+    const analysis = computeFourierAnalysis(waveform.acceleration, waveform.dt, 'cm/s²·s', {
+      applyFrequencyTaper: false,
+      applyTimeTaper: true,
+      timeTaperFraction: 0.05,
+    });
+    const smoothed = smoothFourierSpectrumParzen(analysis.spectrum, {
+      bandwidthHz: REPORT_PARZEN_BANDWIDTH_HZ,
+      dcAmplitude: analysis.metadata.dcAmplitude,
+    });
+    const style = componentSeriesStyle(waveform.component, index);
+    return {
+      waveform,
+      analysis,
+      smoothing: smoothed.smoothing,
+      series: {
+        name: waveform.componentLabel,
+        x: smoothed.frequency,
+        y: smoothed.amplitude,
+        color: style.color,
+        dashArray: style.dashArray,
+      },
+    };
+  });
+}
+
+function commonFourierBand(entries: readonly ReportFourierEntry[]): [number, number] {
+  const lower = Math.max(0.1, ...entries.map((entry) => Math.max(
+    entry.analysis.metadata.firstPositiveFrequencyHz,
+    entry.analysis.metadata.independentResolutionHz,
+    entry.waveform.preprocessing?.applyHighpass ? entry.waveform.preprocessing.highpassHz : 0,
+  )));
+  const upper = Math.min(20, ...entries.map((entry) => Math.min(
+    entry.analysis.metadata.nyquistFrequencyHz,
+    entry.waveform.preprocessing?.applyLowpass ? entry.waveform.preprocessing.lowpassHz : Number.POSITIVE_INFINITY,
+  )));
+  if (Number.isFinite(lower) && Number.isFinite(upper) && upper > lower) return [lower, upper];
+  const fallbackUpper = Math.min(...entries.map((entry) => entry.analysis.metadata.nyquistFrequencyHz));
+  return [Math.max(1e-3, Math.min(lower, fallbackUpper / 10)), Math.max(1e-2, fallbackUpper)];
+}
+
+function logYDomain(series: readonly SeriesSpec[], xDomain: [number, number]): [number, number] {
+  const values = series.flatMap((entry) => entry.y.filter((value, index) => (
+    Number.isFinite(value) && value > 0 && entry.x[index] >= xDomain[0] && entry.x[index] <= xDomain[1]
+  )));
+  if (values.length === 0) return [1e-4, 1];
+  const maximum = Math.max(...values);
+  return [niceLogFloor(maximum / 1e4, 1e-4), niceLogCeil(maximum * 1.05, 1)];
+}
+
+function linearYDomain(series: readonly SeriesSpec[]): [number, number] {
+  const values = series.flatMap((entry) => entry.y.filter((value) => Number.isFinite(value) && value >= 0));
+  const maximum = values.length > 0 ? Math.max(...values) : 1;
+  const ticks = linearTicks(0, maximum * 1.08, 5);
+  return [0, Math.max(maximum * 1.08, ticks[ticks.length - 1] ?? 1)];
+}
+
+function finiteXDomain(series: readonly SeriesSpec[]): [number, number] | undefined {
+  const values = series.flatMap((entry) => entry.x.filter((value, index) => Number.isFinite(value) && value > 0 && Number.isFinite(entry.y[index])));
+  return values.length > 1 ? [Math.min(...values), Math.max(...values)] : undefined;
+}
+
+export function ReportFigurePanel({ waveforms, jmaWaveforms, peaks, responseSettings, initialPage = 'summary' }: ReportFigurePanelProps): JSX.Element {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const stations = useMemo(() => buildReportStations(waveforms, peaks), [waveforms, peaks]);
   const [stationId, setStationId] = useState<string>('');
+  const [page, setPage] = useState<ReportPage>(initialPage);
   const selectedStation = stations.find((station) => station.id === (stationId || stations[0]?.id)) ?? stations[0];
   const selectedWaveforms = useMemo(
     () => selectedStation?.waveforms.slice().sort((a, b) => componentRank(a.component) - componentRank(b.component)) ?? [],
@@ -696,23 +942,139 @@ export function ReportFigurePanel({ waveforms, jmaWaveforms, peaks, responseSett
     return jmaWaveforms.filter((waveform) => selectedIds.has(waveform.sourceRecordId));
   }, [jmaWaveforms, selectedWaveforms]);
   const selectedIntensity = useMemo(() => computeJmaIntensity(selectedJmaWaveforms), [selectedJmaWaveforms]);
-  const response = useMemo(() => responseSeries(selectedWaveforms, responseSettings), [selectedWaveforms, responseSettings]);
+  const reportResponseSettings = useMemo<ResponseSpectrumSettings>(() => ({
+    ...responseSettings,
+    dampingRatio: REPORT_DAMPING_RATIO,
+  }), [responseSettings]);
+  const responseResults = useMemo(
+    () => computeResponseSpectra(selectedWaveforms, reportResponseSettings),
+    [selectedWaveforms, reportResponseSettings],
+  );
+  const psvResponse = useMemo(() => responseSeries(responseResults, 'psv'), [responseResults]);
+  const saResponse = useMemo(() => responseSeries(responseResults, 'psa'), [responseResults]);
+  const fourierEntries = useMemo(() => reportFourierEntries(selectedWaveforms), [selectedWaveforms]);
+  const fourierSeries = useMemo(() => fourierEntries.map((entry) => entry.series), [fourierEntries]);
+  const fourierBand = useMemo(() => commonFourierBand(fourierEntries), [fourierEntries]);
+  const fourierYDomain = useMemo(() => logYDomain(fourierSeries, fourierBand), [fourierBand, fourierSeries]);
+  const saComputedPeriodDomain = useMemo(() => finiteXDomain(saResponse), [saResponse]);
+  const saPeriodDomain = saComputedPeriodDomain ?? [responseSettings.minPeriod, responseSettings.maxPeriod] as [number, number];
+  const saYDomain = useMemo(() => linearYDomain(saResponse), [saResponse]);
   const timeAxis = useMemo(() => reportTimeAxis(selectedWaveforms), [selectedWaveforms]);
+  const consistency = useMemo(() => componentConsistency(selectedWaveforms), [selectedWaveforms]);
+  const provenance = useMemo(() => buildFigureProvenance(selectedWaveforms), [selectedWaveforms]);
 
-  if (waveforms.length === 0 || !selectedStation) {
+  if (waveforms.length === 0 || !selectedStation || fourierEntries.length === 0) {
     return <p className="empty-state">No data is available for the report figure.</p>;
   }
 
   const row = selectedStation.row;
-  const firstWaveform = selectedWaveforms[0] ?? waveforms[0];
   const pga = metricPeak(selectedPeaks, 'pga');
   const pgv = metricPeak(selectedPeaks, 'pgv');
   const pgd = metricPeak(selectedPeaks, 'pgd');
-  const fileNameBase = safeFileName(`report_overview_${selectedStation.label}`);
+  const duration = recordDurationSeconds(selectedWaveforms);
+  const stationHeight = sharedMetadataNumber(selectedWaveforms, 'stationHeightM');
+  const magnitude = sharedMetadataNumber(selectedWaveforms, 'magnitude');
+  const originTime = sharedMetadataText(selectedWaveforms, 'originTime');
+  const recordTime = sharedMetadataText(selectedWaveforms, 'recordTime');
+  const componentLabel = consistency.completeThreeComponentSet
+    ? 'NS / EW / UD complete'
+    : `${consistency.observedComponents.join(' / ') || 'Unlabelled'} (${consistency.observedComponents.length})`;
+  const consistencyLabel = `${componentLabel} · ${consistency.status === 'consistent' ? 'metadata consistent' : `review ${consistency.inconsistentFields.length} metadata field(s)`}`;
+  const accelerationPanelTitle = consistency.completeThreeComponentSet
+    ? '(a) Three-component acceleration'
+    : `(a) Acceleration · ${consistency.observedComponents.join(' / ') || 'unlabelled'}`;
+  const velocityPanelTitle = consistency.completeThreeComponentSet
+    ? '(a) Three-component velocity'
+    : `(a) Velocity · ${consistency.observedComponents.join(' / ') || 'unlabelled'}`;
+  const fileNameBase = safeFileName(`report_${page}_${selectedStation.label}`);
+  const preprocessingLabels = unique(selectedWaveforms.map((waveform) => waveform.preprocessing ? preprocessingLabel(waveform.preprocessing) : 'unavailable'));
+  const preprocessingFooter = preprocessingLabels.length === 1 ? preprocessingLabels[0] : 'varies by component; see Methods JSON';
+  const reportMetadata = {
+    schema: 'strong-motion-engineering-report/2.0',
+    pageDesign: {
+      availablePlates: ['summary', 'technical'],
+      selectedPlate: page,
+      reportSizeMm: [210, 297],
+      minimumTypographyPt: 7.5,
+      minimumLineWeightPt: 0.5,
+    },
+    recordSet: selectedStation.label,
+    sourceFiles: selectedWaveforms.map((waveform) => waveform.fileName),
+    componentConsistency: consistency,
+    provenance,
+    metadataByComponent: selectedWaveforms.map((waveform) => ({
+      sourceRecordId: waveform.sourceRecordId,
+      fileName: waveform.fileName,
+      component: waveform.componentLabel,
+      samplingHz: waveform.samplingHz,
+      dtSeconds: waveform.dt,
+      durationSeconds: (waveform.time[waveform.time.length - 1] ?? 0) - (waveform.time[0] ?? 0),
+      metadata: waveform.metadata,
+      preprocessing: waveform.preprocessing ?? null,
+    })),
+    timeReference: timeAxis.reference,
+    jmaIntensity: {
+      input: 'original acceleration',
+      available: selectedIntensity.available,
+      value: selectedIntensity.available ? selectedIntensity.intensity : null,
+      classLabel: selectedIntensity.available ? selectedIntensity.classLabel : null,
+    },
+    waveformPanels: {
+      input: 'active preprocessing',
+      sharedOrdinateWithinPanel: true,
+      peakLabelsOutsideDataRegion: true,
+    },
+    fourierAmplitudeSpectrum: {
+      input: 'active preprocessed acceleration',
+      meanRemoved: true,
+      timeWindow: '5% cosine edge taper',
+      amplitudeDefinition: '|DFT| * dt; positive-frequency half-spectrum; one-sided factor 1; no record-length or window-gain normalization',
+      smoothing: {
+        method: 'Parzen',
+        bandwidthHz: REPORT_PARZEN_BANDWIDTH_HZ,
+        domain: 'squared-amplitude power',
+        amplitudeRecovery: 'square root after smoothing',
+        boundaryTreatment: 'circular convolution of Hermitian two-sided spectrum',
+      },
+      displayBandHz: fourierBand,
+      records: fourierEntries.map((entry) => ({
+        component: entry.waveform.componentLabel,
+        ...entry.analysis.metadata,
+        parzenSmoothing: entry.smoothing,
+      })),
+    },
+    responseSpectrum: {
+      method: 'Nigam–Jennings linear-SDOF exact recurrence for linearly interpolated acceleration with adaptive substepping and free-vibration tail',
+      input: 'active preprocessed acceleration',
+      dampingRatio: REPORT_DAMPING_RATIO,
+      requestedPeriodRangeSeconds: [responseSettings.minPeriod, responseSettings.maxPeriod],
+      computedPeriodRangeSeconds: saComputedPeriodDomain ?? null,
+      displayPeriodRangeSeconds: saPeriodDomain,
+      status: saComputedPeriodDomain ? 'computed' : 'no-plottable-finite-range',
+      requestedPeriodCount: responseSettings.periodCount,
+      generatedPeriodCount: responseResults[0]?.points.length ?? 0,
+      periodGrid: 'natural-logarithmic spacing after bounded period validation',
+      finitePointsByComponent: responseResults.map((result) => ({
+        component: result.componentLabel,
+        finiteSa: result.points.filter((point) => Number.isFinite(point.psa)).length,
+        finitePsv: result.points.filter((point) => Number.isFinite(point.psv)).length,
+        unsupported: result.points.filter((point) => !Number.isFinite(point.psa) || !Number.isFinite(point.psv)).length,
+      })),
+      summaryOrdinate: 'absolute acceleration response Sa [cm/s²]',
+      technicalOrdinate: 'pseudo-spectral velocity pSv [cm/s]',
+      technicalTripartiteDisplayDomains: tripartiteDomains(psvResponse, reportResponseSettings),
+    },
+    locator: {
+      type: 'tile-independent source-station schematic',
+      projection: 'local equirectangular; x=(longitude-longitude0)*111.32*cos(mean latitude) km; y=(latitude-latitude0)*111.32 km',
+      equalKilometreScale: true,
+      externalTiles: false,
+    },
+  };
 
   return (
     <div className="chart-stack">
-      <div className="inline-controls">
+      <div className="inline-controls report-controls">
         {stations.length > 1 && (
           <label>
             Record set
@@ -721,23 +1083,36 @@ export function ReportFigurePanel({ waveforms, jmaWaveforms, peaks, responseSett
             </select>
           </label>
         )}
-        <span className="note">A4 portrait overview figure with metadata, intensity, distance, stacked waveforms, and tripartite response spectrum.</span>
+        <label>
+          Report plate
+          <select value={page} onChange={(event) => setPage(event.target.value as ReportPage)}>
+            <option value="summary">Page 1 · Executive summary</option>
+            <option value="technical">Page 2 · Technical detail</option>
+          </select>
+        </label>
+        <span className="note">Page 1 prioritises acceleration, Parzen FAS, and 5%-damped Sa. Page 2 separates velocity and tripartite detail.</span>
+        {consistency.status === 'review-required' && <span className="note warning-text">Component metadata differs: {consistency.inconsistentFields.join(', ')}. The export records every component separately.</span>}
       </div>
 
-      <figure className="chart-card publication-figure report-figure" tabIndex={0} aria-label="A4 strong-motion report figure; horizontally scrollable on narrow screens">
-        <div className="chart-toolbar">
+      <figure className="chart-card publication-figure report-figure" data-report-page={page} tabIndex={0} aria-label={`A4 strong-motion report ${page} plate; horizontally scrollable on narrow screens`}>
+        <div className="chart-toolbar report-toolbar">
           <div className="figure-toolbar-label">
-            <span className="figure-kicker">A4 analysis overview</span>
-            <span className="note">210 × 297 mm · editable vector or 300 dpi raster</span>
+            <span className="figure-kicker">A4 engineering report · {page === 'summary' ? 'Page 1' : 'Page 2'}</span>
+            <strong>{page === 'summary' ? 'Executive summary' : 'Technical detail'} · {selectedStation.label}</strong>
+            <span className="note">210 × 297 mm · vector-first · minimum type 7.5 pt · minimum rule 0.5 pt</span>
           </div>
           <div className="button-row compact">
-            <button type="button" className="secondary" aria-label="Download strong-motion A4 report as a portable SVG using system fonts" onClick={() => svgRef.current && downloadSvg(svgRef.current, `${fileNameBase}.svg`, { widthMm: 210, heightMm: 297 })}>SVG · vector</button>
-            <button type="button" className="secondary" aria-label="Download strong-motion A4 report as a 300 dpi PNG" onClick={() => svgRef.current && void downloadPng(svgRef.current, `${fileNameBase}.png`, { dpi: 300, widthMm: 210 })}>PNG · 300 dpi</button>
+            <button type="button" className="secondary" aria-label="Download the selected A4 report plate as SVG" onClick={() => svgRef.current && downloadSvg(svgRef.current, `${fileNameBase}.svg`, { widthMm: 210, heightMm: 297 })}>SVG · vector</button>
+            <button type="button" className="secondary" aria-label="Download the selected A4 report plate as a 300 dpi PNG" onClick={() => svgRef.current && void downloadPng(svgRef.current, `${fileNameBase}.png`, { dpi: 300, widthMm: 210, heightMm: 297 })}>PNG · 300 dpi</button>
+            <button type="button" className="secondary" onClick={() => downloadFigureMetadata(`report_methods_${page}_${selectedStation.label}`, reportMetadata)}>Methods · JSON</button>
           </div>
         </div>
+        <span className="mobile-scroll-hint" aria-hidden="true">Swipe horizontally to inspect the complete A4 plate →</span>
         <svg
           ref={svgRef}
-          className="publication-chart"
+          className="publication-chart report-chart"
+          data-min-font-pt="7.6"
+          data-min-line-pt="0.5"
           width={WIDTH}
           height={HEIGHT}
           viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
@@ -746,64 +1121,93 @@ export function ReportFigurePanel({ waveforms, jmaWaveforms, peaks, responseSett
           preserveAspectRatio="xMidYMid meet"
           style={{ fontFamily: FONT_FAMILY }}
         >
-          <title id="report-figure-title">Strong-motion record overview for {selectedStation.label}</title>
-          <desc id="report-figure-description">A4 portrait report containing record metadata, coordinates, distances, intensity and peak values, acceleration and velocity time histories on shared axes, and a five-percent-damped tripartite response spectrum.</desc>
-          <metadata>{JSON.stringify({
-            station: selectedStation.label,
-            sourceFiles: selectedWaveforms.map((waveform) => waveform.fileName),
-            dampingRatio: responseSettings.dampingRatio,
-            reportSizeMm: [210, 297],
-            jmaIntensityInput: 'original acceleration',
-            waveformInput: 'active preprocessing',
-            timeReference: timeAxis.reference,
-          })}</metadata>
+          <title id="report-figure-title">{`${page === 'summary' ? 'Strong-motion engineering summary' : 'Strong-motion technical detail'} for ${selectedStation.label}`}</title>
+          <desc id="report-figure-description">{page === 'summary'
+            ? 'A4 executive report with event and station metadata, a source-station locator, key ground-motion metrics, three-component acceleration, Parzen-smoothed Fourier amplitude spectra, and five-percent-damped acceleration response spectra.'
+            : 'A4 technical appendix with three-component velocity and a large five-percent-damped tripartite pseudo-spectral velocity response spectrum.'}</desc>
+          <metadata>{JSON.stringify(reportMetadata)}</metadata>
           <rect width={WIDTH} height={HEIGHT} fill="#ffffff" />
-          <text x="60" y="54" fontSize="23" fontWeight="700" fill="#111827">Strong-motion record overview</text>
-          <text x={WIDTH - 60} y="53" textAnchor="end" fontSize="13.5" fontWeight="600" fill="#374151">{selectedStation.label}</text>
-          <line x1="60" y1="74" x2={WIDTH - 60} y2="74" stroke="#111827" strokeWidth="0.9" />
+          <text x="58" y="53" fontSize={TITLE_FONT} fontWeight="700" fill="#17212b">{page === 'summary' ? 'Strong-motion engineering summary' : 'Strong-motion technical detail'}</text>
+          <text x={WIDTH - 58} y="52" textAnchor="end" fontSize={BODY_FONT} fontWeight="700" fill="#374151">{selectedStation.label}</text>
+          <line x1="58" y1="75" x2={WIDTH - 58} y2="75" stroke="#17212b" strokeWidth={AXIS_LINE} />
 
-          {card({ x: 60, y: 94, width: 310, height: 180 }, 'Record', (
-            textRows(60, 148, [
-              ['Station', selectedStation.label],
-              ['Record Time', firstWaveform.metadata.recordTime ?? '-'],
-              ['Origin Time', firstWaveform.metadata.originTime ?? '-'],
-              ['Components', selectedWaveforms.map((waveform) => waveform.componentLabel).join(' / ') || '-'],
-              ['Sampling', `${formatNumber(firstWaveform.samplingHz, 4)} Hz`],
-              ['Files', `${selectedWaveforms.length}`],
-            ], 22)
-          ))}
-
-          {card({ x: 400, y: 94, width: 360, height: 180 }, 'Coordinates and Distance', (
-            textRows(400, 148, [
-              ['Station Lat/Lon', `${fmt(row?.stationLat, 6)}, ${fmt(row?.stationLon, 6)}`],
-              ['Source Lat/Lon', `${fmt(row?.eventLat, 6)}, ${fmt(row?.eventLon, 6)}`],
-              ['Source Depth', fmt(row?.depthKm, 3, ' km')],
-              ['Epicentral Dist.', fmt(row?.epicentralDistanceKm, 3, ' km')],
-              ['Hypocentral Dist.', fmt(row?.hypocentralDistanceKm, 3, ' km')],
-            ], 22)
-          ))}
-
-          {card({ x: 790, y: 94, width: 270, height: 180 }, 'Ground Motion Strength', (
+          {page === 'summary' ? (
             <g>
-              {textRows(790, 148, [
-                ['JMA Intensity', selectedIntensity.available ? formatNumber(selectedIntensity.intensity, 1) : '-'],
-                ['Shindo Class', selectedIntensity.available ? selectedIntensity.classLabel : '-'],
-                ['PGA', pga ? `${formatNumber(pga.value, 4)} cm/s² (${pga.component})` : '-'],
-                ['PGV', pgv ? `${formatNumber(pgv.value, 4)} cm/s (${pgv.component})` : '-'],
-                ['PGD', pgd ? `${formatNumber(pgd.value, 4)} cm (${pgd.component})` : '-'],
-              ], 22)}
+              {card({ x: 58, y: 92, width: 646, height: 194 }, 'Event / station', (
+                <g>
+                  {textRows(58, 148, [
+                    ['Origin time', originTime],
+                    ['Magnitude', isFiniteNumber(magnitude) ? `M ${magnitude.toFixed(1)}` : '-'],
+                    ['Source lat/lon', `${formatCoordinate(row?.eventLat)}, ${formatCoordinate(row?.eventLon)}`],
+                    ['Depth', formatFixed(row?.depthKm, 1, ' km')],
+                    ['Duration', formatFixed(duration, 1, ' s')],
+                  ], 26, 112)}
+                  {textRows(382, 148, [
+                    ['Record time', recordTime],
+                    ['Station', selectedStation.label],
+                    ['Sta. lat/lon', `${formatCoordinate(row?.stationLat)}, ${formatCoordinate(row?.stationLon)}`],
+                    ['Elevation', formatFixed(stationHeight, 0, ' m')],
+                    ['Rₑₚᵢ / Rₕᵧₚ', `${formatFixed(row?.epicentralDistanceKm, 1, ' km')} / ${formatFixed(row?.hypocentralDistanceKm, 1, ' km')}`],
+                  ], 26, 108)}
+                  <text x="58" y="279" fontSize={SUPPORT_FONT} fontWeight="700" fill={consistency.status === 'consistent' ? '#246b45' : '#a15c00'}>{consistencyLabel}</text>
+                </g>
+              ))}
+              {renderLocator({ x: 730, y: 92, width: 332, height: 194 }, row)}
+              {renderMetricStrip({ x: 58, y: 310, width: 1004, height: 100 }, selectedIntensity, pga, pgv, pgd, duration)}
+              {renderWaveformPanel({ x: 58, y: 444, width: 1004, height: 360 }, accelerationPanelTitle, selectedWaveforms, 'acceleration')}
+              {renderSpectrumPanel(
+                { x: 58, y: 838, width: 486, height: 590 },
+                '(b) Fourier amplitude spectrum',
+                `Parzen B=${REPORT_PARZEN_BANDWIDTH_HZ.toFixed(2)} Hz`,
+                fourierSeries,
+                fourierBand,
+                fourierYDomain,
+                'Frequency [Hz]',
+                'FAS [cm/s²·s]',
+                'log',
+                'report-fas-clip',
+              )}
+              {renderSpectrumPanel(
+                { x: 576, y: 838, width: 486, height: 590 },
+                '(c) Acceleration response spectrum',
+                'Sa · h = 5.0%',
+                saResponse,
+                saPeriodDomain,
+                saYDomain,
+                'Period [s]',
+                'Sa [cm/s²]',
+                'linear',
+                'report-sa-clip',
+              )}
+              <line x1="58" y1="1471" x2={WIDTH - 58} y2="1471" stroke="#7b8790" strokeWidth={MIN_LINE} />
+              <text x="58" y="1496" fontSize={SUPPORT_FONT} fontWeight="600" fill="#52606d">
+                Waveforms/FAS: active preprocessing ({preprocessingFooter}). FAS: 5% cosine taper, |DFT|Δt, Parzen power smoothing B=0.10 Hz.
+              </text>
+              <text x="58" y="1519" fontSize={SUPPORT_FONT} fontWeight="600" fill="#52606d">
+                JMA intensity: original acceleration. Sa: Nigam–Jennings recurrence, h=5.0%. Full per-component settings and source files are embedded and available as Methods JSON.
+              </text>
+              <text x={WIDTH - 58} y="1547" textAnchor="end" fontSize={SUPPORT_FONT} fill="#6b7280">1 / 2</text>
             </g>
-          ))}
-
-          {renderWaveformPanel({ x: 60, y: 310, width: 1000, height: 245 }, '(a) Acceleration waveforms', selectedWaveforms, 'acceleration')}
-          {renderWaveformPanel({ x: 60, y: 592, width: 1000, height: 245 }, '(b) Velocity waveforms', selectedWaveforms, 'velocity')}
-          {renderResponsePanel({ x: 175, y: 875, width: 770, height: 650 }, response, responseSettings)}
-          <line x1="60" y1="1544" x2={WIDTH - 60} y2="1544" stroke="#9ca3af" strokeWidth="0.65" />
-          <text x="60" y="1564" fontSize="11.5" fontWeight="600" fill="#4b5563">
-            Displayed waveforms use active preprocessing; JMA intensity uses original acceleration. Response spectrum damping h = {(responseSettings.dampingRatio * 100).toFixed(1)}%.
-          </text>
+          ) : (
+            <g>
+              <text x="58" y="108" fontSize={BODY_FONT} fontWeight="700" fill="#17212b">{originTime} · {selectedStation.label} · M {isFiniteNumber(magnitude) ? magnitude.toFixed(1) : '–'} · Rₕᵧₚ {formatFixed(row?.hypocentralDistanceKm, 1, ' km')}</text>
+              <text x={WIDTH - 58} y="108" textAnchor="end" fontSize={SUPPORT_FONT} fill="#52606d">{consistencyLabel}</text>
+              {renderWaveformPanel({ x: 58, y: 135, width: 1004, height: 365 }, velocityPanelTitle, selectedWaveforms, 'velocity')}
+              {renderTripartitePanel({ x: 130, y: 540, width: 860, height: 850 }, psvResponse, reportResponseSettings)}
+              <line x1="58" y1="1471" x2={WIDTH - 58} y2="1471" stroke="#7b8790" strokeWidth={MIN_LINE} />
+              <text x="58" y="1496" fontSize={SUPPORT_FONT} fontWeight="600" fill="#52606d">
+                Velocity: active preprocessing and integration drift correction as recorded per component. Tripartite: Nigam–Jennings response, h=5.0%; major-decade guides only.
+              </text>
+              <text x="58" y="1519" fontSize={SUPPORT_FONT} fontWeight="600" fill="#52606d">
+                Time reference: {timeAxis.reference}. Source files, exact preprocessing, response settings, Fourier settings, and component-consistency audit are embedded in SVG metadata.
+              </text>
+              <text x={WIDTH - 58} y="1547" textAnchor="end" fontSize={SUPPORT_FONT} fill="#6b7280">2 / 2</text>
+            </g>
+          )}
         </svg>
-        <figcaption className="chart-caption">A4 portrait report. Component traces use a shared ordinate; the time reference is {timeAxis.reference}. Colour is reinforced by line pattern.</figcaption>
+        <figcaption className="chart-caption">{page === 'summary'
+          ? 'Executive A4 plate: metadata and locator, key metrics, acceleration, Parzen-smoothed FAS, and 5%-damped Sa. Velocity and tripartite detail are intentionally separated onto Page 2.'
+          : `Technical A4 plate: velocity and a large, hierarchy-controlled tripartite response spectrum. The time reference is ${timeAxis.reference}.`}</figcaption>
       </figure>
     </div>
   );

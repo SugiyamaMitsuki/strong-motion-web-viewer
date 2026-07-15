@@ -10,6 +10,8 @@ const {
 const { computePlotGeometry } = require('../.test-dist/src/visualization/plotGeometry.js');
 const { computeHorizontalVerticalRatios } = require('../.test-dist/src/analysis/horizontalVerticalRatio.js');
 const { JournalPlatePanel } = require('../.test-dist/src/components/JournalPlatePanel.js');
+const { ReportFigurePanel } = require('../.test-dist/src/components/ReportFigurePanel.js');
+const { WaveletPanel } = require('../.test-dist/src/components/WaveletPanel.js');
 const { FourierPanel } = require('../.test-dist/src/components/FourierPanel.js');
 const { ResponseSpectrumPanel, responseDomains } = require('../.test-dist/src/components/ResponseSpectrumPanel.js');
 const { StackedTimeHistoryFigure } = require('../.test-dist/src/components/StackedTimeHistoryFigure.js');
@@ -220,6 +222,180 @@ test('journal composite renders PGA, response peaks and reproducibility metadata
     assert.ok(significantDigitCount(match[1]) <= 3, `peak period has excess precision: ${match[1]}`);
     assert.ok(significantDigitCount(match[2]) <= 3, `peak Sa has excess precision: ${match[2]}`);
   });
+});
+
+test('wavelet publication plate defaults to three corrected Morlet-6 components with shared scales', () => {
+  const waveforms = [publicationWaveform('NS'), publicationWaveform('EW', 0.4), publicationWaveform('UD', 0.8)];
+  const markup = renderToStaticMarkup(React.createElement(WaveletPanel, { waveforms }));
+
+  assert.match(markup, /data-wavelet-layout="three-component"/);
+  assert.match(markup, /data-wavelet-quantity="scale-corrected-amplitude"/);
+  assert.match(markup, /data-wavelet-component-count="3"/);
+  assert.match(markup, /data-wavelet-shared-time-axis="true"/);
+  assert.match(markup, /data-wavelet-shared-frequency-axis="true"/);
+  assert.match(markup, /data-wavelet-shared-colour-scale="true"/);
+  assert.match(markup, /data-wavelet-morlet-omega0="6"/);
+  assert.match(markup, /Morlet-6 Balanced/);
+  assert.match(markup, /exact Fourier mapping/);
+  assert.match(markup, /C\(ω₀\) \|W\| \/ √scale/);
+  assert.match(markup, /strong-motion-wavelet-methods\/2\.0/);
+  assert.match(markup, /one aggregate per displayed time-frequency bin containing one or more COI-valid samples/);
+  assert.match(markup, /commonTimeAxis/);
+  assert.match(markup, /commonFrequencyAxis/);
+  assert.match(markup, /commonColourScale/);
+  assert.match(markup, /plate\.NS/);
+  assert.match(markup, /plate\.EW/);
+  assert.match(markup, /plate\.UD/);
+
+  const components = [...markup.matchAll(/data-wavelet-component="([^"]+)"/g)].map((match) => match[1]);
+  assert.deepEqual(components, ['NS', 'EW', 'UD']);
+  const heatmapPathCounts = [...markup.matchAll(/data-wavelet-heatmap-paths="(\d+)"/g)]
+    .map((match) => Number(match[1]));
+  assert.equal(heatmapPathCounts.length, 3);
+  assert.ok(heatmapPathCounts.every((count) => count <= 257), `heatmap paths are bounded: ${heatmapPathCounts.join(', ')}`);
+  const svgMarkup = markup.match(/<svg[\s\S]*?<\/svg>/)?.[0] ?? '';
+  const svgElementCount = (svgMarkup.match(/<(?:g|path|rect|line|text)\b/g) ?? []).length;
+  assert.ok(svgElementCount < 1000, `publication SVG element count is bounded (${svgElementCount})`);
+});
+
+test('wavelet fixed-dB power mode uses a 10 log10 transform and squared physical units', () => {
+  const waveforms = [publicationWaveform('NS'), publicationWaveform('EW', 0.4), publicationWaveform('UD', 0.8)];
+  const amplitudeMarkup = renderToStaticMarkup(React.createElement(WaveletPanel, {
+    waveforms,
+    initialColorMode: 'fixed-db',
+  }));
+  const markup = renderToStaticMarkup(React.createElement(WaveletPanel, {
+    waveforms,
+    initialDisplayQuantity: 'rectified-power',
+    initialColorMode: 'fixed-db',
+  }));
+
+  assert.match(markup, /data-wavelet-quantity="rectified-power"/);
+  assert.match(markup, /data-wavelet-decibel-factor="10"/);
+  assert.match(markup, /Rectified power/);
+  assert.match(markup, /10\*log10\(power\/reference\)/);
+  assert.match(markup, /10 log10 transform/);
+  assert.match(markup, /\(cm\/s²\)²/);
+  assert.doesNotMatch(markup, /20\*log10\(amplitude\/reference\)/);
+  assert.match(amplitudeMarkup, /data-wavelet-decibel-factor="20"/);
+  assert.match(amplitudeMarkup, /20\*log10\(amplitude\/reference\)/);
+  assert.match(amplitudeMarkup, /20 log10 transform/);
+  assert.doesNotMatch(amplitudeMarkup, /10\*log10\(power\/reference\)/);
+});
+
+test('wavelet plate selects one record set and preserves component start-time alignment', () => {
+  const first = [publicationWaveform('NS'), publicationWaveform('EW', 0.4), publicationWaveform('UD', 0.8)]
+    .map((waveform, index) => ({
+      ...waveform,
+      metadata: {
+        ...waveform.metadata,
+        recordTime: `2026/01/01 00:00:0${index}`,
+      },
+    }));
+  const second = first.map((waveform) => ({
+    ...waveform,
+    sourceRecordId: `second-${waveform.component}`,
+    fileName: `second.${waveform.component}`,
+    metadata: {
+      ...waveform.metadata,
+      stationCode: 'PLATE02',
+      stationLat: 36,
+      stationLon: 140,
+      originTime: '2026/01/02 00:00:00',
+      eventLat: 36.2,
+      eventLon: 140.3,
+    },
+  }));
+  const markup = renderToStaticMarkup(React.createElement(WaveletPanel, { waveforms: [...first, ...second] }));
+  const recordSetSelect = markup.match(/Record set<select[^>]*>([\s\S]*?)<\/select>/)?.[1] ?? '';
+
+  assert.equal((recordSetSelect.match(/<option/g) ?? []).length, 2);
+  assert.match(markup, /elapsed time from earliest record start/);
+  assert.match(markup, /plate\.NS/);
+  assert.doesNotMatch(markup, /second\.NS/);
+  assert.deepEqual(
+    [...markup.matchAll(/data-wavelet-component="([^"]+)"/g)].map((match) => match[1]),
+    ['NS', 'EW', 'UD'],
+  );
+});
+
+test('A4 report defaults to a publication-ready summary plate with reproducible methods', () => {
+  const waveforms = [publicationWaveform('NS'), publicationWaveform('EW', 0.4), publicationWaveform('UD', 0.8)];
+  const peaks = waveforms.map((waveform) => ({
+    sourceRecordId: waveform.sourceRecordId,
+    fileName: waveform.fileName,
+    component: waveform.component,
+    componentLabel: waveform.componentLabel,
+    pga: Math.max(...waveform.acceleration.map(Math.abs)),
+    pgv: 0,
+    pgd: 0,
+  }));
+  const responseSettings = { dampingRatio: 0.03, minPeriod: 0.05, maxPeriod: 3, periodCount: 36 };
+  const markup = renderToStaticMarkup(React.createElement(ReportFigurePanel, {
+    waveforms,
+    jmaWaveforms: waveforms,
+    peaks,
+    responseSettings,
+  }));
+
+  assert.match(markup, /data-report-page="summary"/);
+  assert.match(markup, /data-min-font-pt="7\.6"/);
+  assert.match(markup, /data-min-line-pt="0\.5"/);
+  assert.match(markup, /Page 1 · Executive summary/);
+  assert.match(markup, /Page 2 · Technical detail/);
+  assert.match(markup, /Source–station locator/);
+  assert.match(markup, /Three-component acceleration/);
+  assert.match(markup, /Fourier amplitude spectrum/);
+  assert.match(markup, /Parzen B=0\.10 Hz/);
+  assert.match(markup, /FAS \[cm\/s²·s\]/);
+  assert.match(markup, /Acceleration response spectrum/);
+  assert.match(markup, /Sa · h = 5\.0%/);
+  assert.doesNotMatch(markup, /Three-component velocity/);
+  assert.doesNotMatch(markup, /Tripartite response spectrum/);
+  assert.match(markup, /Methods · JSON/);
+  assert.match(markup, /strong-motion-engineering-report\/2\.0/);
+  assert.match(markup, /minimumTypographyPt/);
+  assert.match(markup, /minimumLineWeightPt/);
+  assert.match(markup, /peakLabelsOutsideDataRegion/);
+  assert.match(markup, /componentConsistency/);
+  assert.match(markup, /circular convolution of Hermitian two-sided spectrum/);
+  assert.match(markup, /Nigam–Jennings linear-SDOF exact recurrence/);
+  assert.match(markup, /finitePointsByComponent/);
+  assert.match(markup, /technicalTripartiteDisplayDomains/);
+  assert.match(markup, /local equirectangular/);
+  assert.match(markup, /equalKilometreScale/);
+  assert.match(markup, /plate\.NS/);
+  assert.match(markup, /PLATE01/);
+});
+
+test('A4 report technical plate keeps velocity and tripartite detail off the summary page', () => {
+  const waveforms = [publicationWaveform('NS'), publicationWaveform('EW', 0.4), publicationWaveform('UD', 0.8)];
+  const peaks = waveforms.map((waveform) => ({
+    sourceRecordId: waveform.sourceRecordId,
+    fileName: waveform.fileName,
+    component: waveform.component,
+    componentLabel: waveform.componentLabel,
+    pga: Math.max(...waveform.acceleration.map(Math.abs)),
+    pgv: 0,
+    pgd: 0,
+  }));
+  const markup = renderToStaticMarkup(React.createElement(ReportFigurePanel, {
+    waveforms,
+    jmaWaveforms: waveforms,
+    peaks,
+    responseSettings: { dampingRatio: 0.03, minPeriod: 0.05, maxPeriod: 3, periodCount: 36 },
+    initialPage: 'technical',
+  }));
+
+  assert.match(markup, /data-report-page="technical"/);
+  assert.match(markup, /Strong-motion technical detail/);
+  assert.match(markup, /Three-component velocity/);
+  assert.match(markup, /Tripartite response spectrum: pSv/);
+  assert.match(markup, /major-decade guides/);
+  assert.match(markup, /diagonal: constant Sa \/ Sd/);
+  assert.doesNotMatch(markup, /Three-component acceleration/);
+  assert.doesNotMatch(markup, /Fourier amplitude spectrum/);
+  assert.match(markup, /2 \/ 2/);
 });
 
 test('standalone response renders in-figure damping, peak annotations and method metadata', () => {

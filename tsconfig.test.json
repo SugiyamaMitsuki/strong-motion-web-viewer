@@ -24,6 +24,8 @@
     "src/analysis/statistics.ts",
     "src/analysis/wavelet.ts",
     "src/components/JournalPlatePanel.tsx",
+    "src/components/ReportFigurePanel.tsx",
+    "src/components/WaveletPanel.tsx",
     "src/components/FourierPanel.tsx",
     "src/components/ResponseSpectrumPanel.tsx",
     "src/components/StackedTimeHistoryFigure.tsx",
