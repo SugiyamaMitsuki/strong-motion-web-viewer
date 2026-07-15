@@ -1,5 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { readFileSync } = require('node:fs');
+const path = require('node:path');
 const React = require('react');
 const { renderToStaticMarkup } = require('react-dom/server');
 
@@ -319,7 +321,7 @@ test('wavelet plate selects one record set and preserves component start-time al
   );
 });
 
-test('A4 report defaults to a publication-ready summary plate with reproducible methods', () => {
+test('A4 report defaults to one integrated acceleration, velocity, FAS and pSv plate', () => {
   const waveforms = [publicationWaveform('NS'), publicationWaveform('EW', 0.4), publicationWaveform('UD', 0.8)];
   const peaks = waveforms.map((waveform) => ({
     sourceRecordId: waveform.sourceRecordId,
@@ -338,7 +340,149 @@ test('A4 report defaults to a publication-ready summary plate with reproducible 
     responseSettings,
   }));
 
+  assert.equal((markup.match(/<svg\b/g) ?? []).length, 1);
+  assert.match(markup, /data-report-page="integrated"/);
+  assert.match(markup, /data-report-layout="acceleration-velocity-fas-tripartite"/);
+  assert.match(markup, /data-report-shared-time-axis="true"/);
+  assert.match(markup, /data-report-acceleration-shared-ordinate="true"/);
+  assert.match(markup, /data-report-velocity-shared-ordinate="true"/);
+  assert.match(markup, /data-report-panel-order="acceleration velocity Fourier-amplitude tripartite-pSv"/);
+  assert.match(markup, /data-report-component-encoding="NS-vermillion-solid EW-blue-dashed UD-purple-dotted"/);
+  const waveformGroups = [...markup.matchAll(/data-report-waveform-quantity="([^"]+)" data-report-time-min="([^"]+)" data-report-time-max="([^"]+)" data-report-symmetric-limit="([^"]+)"/g)];
+  assert.deepEqual(waveformGroups.map((match) => match[1]), ['acceleration', 'velocity']);
+  assert.equal(waveformGroups[0][2], waveformGroups[1][2], 'acceleration and velocity share the physical time minimum');
+  assert.equal(waveformGroups[0][3], waveformGroups[1][3], 'acceleration and velocity share the physical time maximum');
+  assert.ok(waveformGroups.every((match) => Number(match[4]) > 0), 'each quantity uses a finite symmetric ordinate');
+  assert.deepEqual(
+    [...markup.matchAll(/data-report-waveform-component="([^"]+)" data-report-waveform-row-quantity="([^"]+)"/g)]
+      .map((match) => `${match[2]}:${match[1]}`),
+    ['acceleration:NS', 'acceleration:EW', 'acceleration:UD', 'velocity:NS', 'velocity:EW', 'velocity:UD'],
+  );
+  const waveformOrdinateLabels = [...markup.matchAll(/data-report-waveform-ordinate-label="([^"]+)"/g)].map((match) => match[1]);
+  assert.equal(waveformOrdinateLabels.length, 18, 'each waveform row labels +limit, zero, and -limit');
+  assert.equal(waveformOrdinateLabels.filter((label) => label === 'positive-limit').length, 6);
+  assert.equal(waveformOrdinateLabels.filter((label) => label === 'zero').length, 6);
+  assert.equal(waveformOrdinateLabels.filter((label) => label === 'negative-limit').length, 6);
+  assert.match(markup, /width="1120"/);
+  assert.match(markup, /height="1584"/);
+  assert.match(markup, /viewBox="0 0 1120 1584"/);
+  assert.match(markup, /data-min-font-pt="7\.6"/);
+  assert.match(markup, /data-min-line-pt="0\.5"/);
+  assert.match(markup, /Integrated strong-motion report/);
+  assert.match(markup, /Three-component acceleration/);
+  assert.match(markup, /Three-component velocity/);
+  assert.match(markup, /Fourier amplitude spectrum/);
+  assert.match(markup, /Parzen B=0\.10 Hz/);
+  assert.match(markup, /Tripartite pSv response/);
+  assert.match(markup, /h = 5\.0%/);
+  assert.match(markup, /data-tripartite-equal-log-decades="true"/);
+  assert.match(markup, /data-tripartite-geometry-preserved="true"/);
+  assert.match(markup, /data-tripartite-guide-units="Sa:cm\/s²;Sd:cm"/);
+  const saGuideLabelCount = Number(markup.match(/data-tripartite-sa-guide-labels="([^"]+)"/)?.[1]);
+  const sdGuideLabelCount = Number(markup.match(/data-tripartite-sd-guide-labels="([^"]+)"/)?.[1]);
+  assert.ok(saGuideLabelCount > 0, 'tripartite labels at least one constant-Sa guide');
+  assert.ok(sdGuideLabelCount > 0, 'tripartite labels at least one constant-Sd guide');
+  const saGuideLabelY = [...markup.matchAll(/<text[^>]*y="([^"]+)"[^>]*transform="rotate\(-45 [^"]+\)"[^>]*>Sa /g)].map((match) => match[1]);
+  const sdGuideLabelY = [...markup.matchAll(/<text[^>]*y="([^"]+)"[^>]*transform="rotate\(45 [^"]+\)"[^>]*>Sd /g)].map((match) => match[1]);
+  assert.equal(new Set(saGuideLabelY).size, saGuideLabelY.length, 'Sa guide labels use distinct vertical positions');
+  assert.equal(new Set(sdGuideLabelY).size, sdGuideLabelY.length, 'Sd guide labels use distinct vertical positions');
+  const tripartitePeriodMin = Number(markup.match(/data-tripartite-period-min="([^"]+)"/)?.[1]);
+  const tripartitePeriodMax = Number(markup.match(/data-tripartite-period-max="([^"]+)"/)?.[1]);
+  assert.ok(Number.isFinite(tripartitePeriodMin));
+  assert.ok(Number.isFinite(tripartitePeriodMax));
+  assert.ok(tripartitePeriodMin >= responseSettings.minPeriod * (1 - 1e-12), 'tripartite does not invent a shorter uncomputed period');
+  assert.ok(tripartitePeriodMax <= responseSettings.maxPeriod * (1 + 1e-12), 'tripartite does not invent a longer uncomputed period');
+  assert.match(markup, /Acceleration FAS \|A\(f\)\| \[cm\/s\]/);
+  assert.match(markup, /data-spectrum-panel="report-integrated-fas-clip"/);
+  assert.match(markup, /data-spectrum-y-domain-includes-positive-range="true"/);
+  assert.match(markup, /displayUnitEquivalence/);
+  assert.match(markup, /Guide labels: Sa \[cm\/s²\] \/ Sd \[cm\]/);
+  assert.match(markup, /Acceleration:/);
+  assert.match(markup, /Velocity: derived quantity; integration drift correction/);
+  assert.doesNotMatch(markup, /<text[^>]*>\s*Acceleration:[^<]*integration drift/);
+  assert.match(markup, /JMA: original acceleration/);
+  assert.match(markup, /Common time axis:/);
+  assert.match(markup, /FAS: mean removed; 5% cosine taper/);
+  assert.match(markup, /equal-decade Sa\/Sd guides/);
+  assert.match(markup, /1\s*\/\s*1/);
+  assert.match(markup, /Grayscale check/);
+  assert.match(markup, /Methods · JSON/);
+  assert.match(markup, /strong-motion-engineering-report\/3\.0/);
+  assert.match(markup, /reportSizeMm/);
+  assert.match(markup, /integratedPanelOrder/);
+  assert.match(markup, /renderedPanels/);
+  assert.match(markup, /visibleOnSelectedPlate/);
+  assert.match(markup, /displayedRecordInterval/);
+  assert.match(markup, /componentDurationsSeconds/);
+  assert.match(markup, /sharedTimeAxisAcrossAccelerationAndVelocity/);
+  assert.match(markup, /componentEncoding/);
+  assert.match(markup, /identificationDoesNotDependOnColourAlone/);
+  assert.match(markup, /componentConsistency/);
+  assert.match(markup, /circular convolution of Hermitian two-sided spectrum/);
+  assert.match(markup, /Nigam–Jennings linear-SDOF exact recurrence/);
+  assert.match(markup, /plate\.NS/);
+  assert.match(markup, /PLATE01/);
+  assert.doesNotMatch(markup, /Source–station locator/);
+  assert.doesNotMatch(markup, />\(c\) Acceleration response spectrum</);
+});
+
+test('A4 report distinguishes optional acceleration centering from mandatory FAS centering', () => {
+  const waveforms = [publicationWaveform('NS'), publicationWaveform('EW', 0.4), publicationWaveform('UD', 0.8)]
+    .map((waveform) => ({
+      ...waveform,
+      preprocessing: { ...waveform.preprocessing, removeMean: false },
+    }));
+  const peaks = waveforms.map((waveform) => ({
+    sourceRecordId: waveform.sourceRecordId,
+    fileName: waveform.fileName,
+    component: waveform.component,
+    componentLabel: waveform.componentLabel,
+    pga: Math.max(...waveform.acceleration.map(Math.abs)),
+    pgv: 0,
+    pgd: 0,
+  }));
+  const markup = renderToStaticMarkup(React.createElement(ReportFigurePanel, {
+    waveforms,
+    jmaWaveforms: waveforms,
+    peaks,
+    responseSettings: { dampingRatio: 0.05, minPeriod: 0.05, maxPeriod: 3, periodCount: 36 },
+  }));
+
+  const accelerationFooter = markup.match(/<text[^>]*>\s*Acceleration:[^<]*<\/text>/)?.[0] ?? '';
+  assert.ok(accelerationFooter, 'acceleration processing footer is visible');
+  assert.doesNotMatch(accelerationFooter, /mean removed/);
+  assert.match(markup, /FAS: mean removed; 5% cosine taper/);
+  assert.match(markup, /&quot;meanRemoved&quot;:true/);
+});
+
+test('A4 report print CSS preserves the 210 by 297 mm export scale', () => {
+  const css = readFileSync(path.join(__dirname, '..', 'src', 'styles.css'), 'utf8');
+  assert.match(css, /@page report\s*{[^}]*size:\s*A4 portrait;[^}]*margin:\s*0;[^}]*}/s);
+  assert.match(css, /\.report-figure \.report-chart\s*{[^}]*width:\s*210mm;[^}]*max-width:\s*210mm;[^}]*max-height:\s*297mm;[^}]*}/s);
+});
+
+test('A4 report preserves the executive summary plate as an explicit legacy view', () => {
+  const waveforms = [publicationWaveform('NS'), publicationWaveform('EW', 0.4), publicationWaveform('UD', 0.8)];
+  const peaks = waveforms.map((waveform) => ({
+    sourceRecordId: waveform.sourceRecordId,
+    fileName: waveform.fileName,
+    component: waveform.component,
+    componentLabel: waveform.componentLabel,
+    pga: Math.max(...waveform.acceleration.map(Math.abs)),
+    pgv: 0,
+    pgd: 0,
+  }));
+  const responseSettings = { dampingRatio: 0.03, minPeriod: 0.05, maxPeriod: 3, periodCount: 36 };
+  const markup = renderToStaticMarkup(React.createElement(ReportFigurePanel, {
+    waveforms,
+    jmaWaveforms: waveforms,
+    peaks,
+    responseSettings,
+    initialPage: 'summary',
+  }));
+
   assert.match(markup, /data-report-page="summary"/);
+  assert.match(markup, /data-report-layout="summary"/);
   assert.match(markup, /data-min-font-pt="7\.6"/);
   assert.match(markup, /data-min-line-pt="0\.5"/);
   assert.match(markup, /Page 1 · Executive summary/);
@@ -350,10 +494,13 @@ test('A4 report defaults to a publication-ready summary plate with reproducible 
   assert.match(markup, /FAS \[cm\/s²·s\]/);
   assert.match(markup, /Acceleration response spectrum/);
   assert.match(markup, /Sa · h = 5\.0%/);
+  assert.match(markup, /Acceleration:/);
+  assert.match(markup, /FAS: mean removed; 5% cosine taper/);
+  assert.doesNotMatch(markup, /<text[^>]*>\s*Acceleration:[^<]*integration drift/);
   assert.doesNotMatch(markup, /Three-component velocity/);
   assert.doesNotMatch(markup, /Tripartite response spectrum/);
   assert.match(markup, /Methods · JSON/);
-  assert.match(markup, /strong-motion-engineering-report\/2\.0/);
+  assert.match(markup, /strong-motion-engineering-report\/3\.0/);
   assert.match(markup, /minimumTypographyPt/);
   assert.match(markup, /minimumLineWeightPt/);
   assert.match(markup, /peakLabelsOutsideDataRegion/);
@@ -366,6 +513,7 @@ test('A4 report defaults to a publication-ready summary plate with reproducible 
   assert.match(markup, /equalKilometreScale/);
   assert.match(markup, /plate\.NS/);
   assert.match(markup, /PLATE01/);
+  assert.match(markup, /1\s*\/\s*2/);
 });
 
 test('A4 report technical plate keeps velocity and tripartite detail off the summary page', () => {
@@ -392,9 +540,11 @@ test('A4 report technical plate keeps velocity and tripartite detail off the sum
   assert.match(markup, /Three-component velocity/);
   assert.match(markup, /Tripartite response spectrum: pSv/);
   assert.match(markup, /major-decade guides/);
-  assert.match(markup, /diagonal: constant Sa \/ Sd/);
+  assert.match(markup, /Velocity: derived quantity; integration drift correction/);
+  assert.match(markup, /Guide labels: Sa \[cm\/s²\] \/ Sd \[cm\]/);
   assert.doesNotMatch(markup, /Three-component acceleration/);
-  assert.doesNotMatch(markup, /Fourier amplitude spectrum/);
+  assert.doesNotMatch(markup, />\(b\) Fourier amplitude spectrum</);
+  assert.match(markup, /strong-motion-engineering-report\/3\.0/);
   assert.match(markup, /2 \/ 2/);
 });
 

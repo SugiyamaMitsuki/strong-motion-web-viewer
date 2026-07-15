@@ -63,17 +63,18 @@
 - 三成分比較は NS/EW/UD を共通 time/frequency/colour scale で積層し、共通 colour bar は1本にする。単成分 mode は詳細検査用として残す。
 - heatmap は高解像度 raster、軸・文字・COI・注記は vector とする mixed artwork を許容し、巨大な SVG cell 群と描画 seam を避ける。
 
-### A4 overview report
+### A4 integrated report
 
-- 1ページ目は意思決定に必要な overview とし、event/station、M、depth、distance、duration、主要 ground-motion 指標、三成分 acceleration、Parzen FAS、減衰を明示した Sa を優先する。
-- 外部 tile に依存しない locator inset を使い、station と epicentre の相対位置、北、距離を小面積で伝える。
-- velocity、dense tripartite、三成分 scalogram は詳細 plate または2ページ目へ分離し、1ページ目へ詰め込まない。
-- A4最終寸法で本文 7.5 pt以上、軸目盛 8 pt以上、補助線 0.5 pt以上、data line 0.8 pt以上を確保する。
-- peak annotation は data region の外または専用 margin に置き、波形を隠さない。時間 grid は sparse にし、zero line、major grid、data trace の濃度階層を分ける。
-- tripartite guide は decade major と必要な 2・5 minor に制限し、主曲線より弱くする。
-- 座標・距離・peak の表示桁は source precision と図の用途に合わせ、意味のない小数桁を増やさない。
-- footer と本文は一般的な印刷 safe area 内に置き、print CSS に `size: A4 portrait` と余白を明示する。
-- Methods JSON と SVG metadata に source files、component consistency、preprocessing、Parzen bandwidth/window、response method/damping/period grid、time reference、app version、build revision を記録する。
+- 既定は A4 縦1ページの integrated plate とし、上から三成分 acceleration、三成分 velocity、最下段に Parzen FAS と減衰 5% の tripartite pSv を左右同寸で配置する。6本の時刻歴から周波数特性と応答までを1枚で追跡できることを優先する。
+- acceleration と velocity の6段は同じ physical time axis と major-grid 座標を使う。レコード開始時刻を解釈できる場合は最早時刻へ整列し、できない場合は成分相対時刻であることを図と metadata に明記する。
+- ordinate は acceleration 三成分と velocity 三成分のそれぞれで共通の対称範囲とし、三成分の振幅を直接比較できること。範囲は絶対値最大に headroom を加えて nice number へ切り上げ、0線を常に表示する。
+- 背景は白、文字と軸は黒か濃灰とし、dashboard 用の card、影、角丸は artwork に入れない。time grid は sparse にし、zero line、major grid、data trace の濃度階層を分ける。
+- NS/EW/UD は colour だけでなく、実線・破線・点線でも識別する。FAS と pSv では共通の成分対応を使い、grayscale でも判別できること。
+- A4最終寸法で本文 7.5 pt以上、軸目盛 8 pt以上、補助線 0.5 pt以上、data line 0.8 pt以上を確保する。peak annotation は data region の外または専用 margin に置き、波形を隠さない。
+- FAS は論文用既定の Parzen `B = 0.10 Hz` と実際の解析時間範囲を artwork に明示する。tripartite pSv は減衰 5% とし、decade major と必要な 2・5 minor だけに制限した Sa/Sd guide を主曲線より弱く描く。
+- 従来の event/station、locator、ground-motion metrics、acceleration、FAS、Sa を組み合わせた summary plate と、velocity/tripartite を拡大した technical plate は補助 plate として残す。これらを integrated plate の代わりの既定にしない。
+- footer と本文は artwork 内部の印刷 safe area に置き、print CSS は 210 × 297 mm の artboard を縮小せず `size: A4 portrait` で出力する。これにより宣言した最小文字・線幅を直接印刷でも維持する。座標・距離・peak は source precision と図の用途に合わせた桁数で表示する。
+- integrated plate と各補助 plate は、編集可能な SVG、A4幅の PNG、Methods JSON をそれぞれ書き出す。Methods JSON と SVG metadata に source files、component consistency、preprocessing、Parzen bandwidth/window、response method/damping/period grid、time reference、app version、build revision を記録する。
 
 ## 再現性ルール
 
